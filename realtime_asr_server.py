@@ -68,7 +68,6 @@ def init_models():
             print("  - 加载复检模型: SenseVoiceSmall")
             sensevoice_model = AutoModel(
                 model="iic/SenseVoiceSmall",
-                trust_remote_code=True,
                 device="cuda:0",
                 disable_update=True,
             )
@@ -260,8 +259,6 @@ class RealtimeASR:
                 }
             else:
                 self._maybe_commit_segment(text)
-        except Exception as e:
-            print(f"❌ 识别错误: {e}")
         except Exception as e:
             print(f"❌ 识别错误: {e}")
             import traceback
