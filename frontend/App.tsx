@@ -17,11 +17,11 @@ const App: React.FC = () => {
             <div className="w-7 h-7 md:w-8 md:h-8 bg-slate-900 rounded-lg flex items-center justify-center">
               <Activity className="w-4 h-4 md:w-5 md:h-5 text-white" />
             </div>
-            <h1 className="text-base md:text-lg font-semibold tracking-tight">EchoScribe AI</h1>
+            <h1 className="text-base md:text-lg font-semibold tracking-tight">星声记</h1>
           </div>
           
           <div className="text-[10px] md:text-xs font-medium text-slate-400 bg-slate-50 px-2 md:px-3 py-1 rounded-full border border-slate-100">
-            由 Gemini 2.5 驱动
+            Paraformer + SenseVoice + Qwen3
           </div>
         </div>
       </header>
@@ -31,14 +31,8 @@ const App: React.FC = () => {
         {/* Hero Text */}
         <div className="text-center mb-8 md:mb-12">
           <h2 className="text-3xl md:text-5xl font-bold mb-3 md:mb-4 text-slate-900 tracking-tight leading-tight">
-            语音转文字， <br className="block md:hidden" />
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 to-violet-500">
-              即刻生成，精准高效。
-            </span>
+            语音转录  <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 to-violet-500">即刻生成</span>
           </h2>
-          <p className="text-sm md:text-lg text-slate-500 max-w-2xl mx-auto px-2 leading-relaxed">
-            基于 Google Gemini 多模态模型，提供实时语音听写与高保真音频文件分析。
-          </p>
         </div>
 
         {/* Toggle Switch */}
@@ -82,7 +76,7 @@ const App: React.FC = () => {
 
       {/* Footer */}
       <footer className="py-6 md:py-8 text-center text-slate-400 text-xs md:text-sm px-4">
-        <p>&copy; {new Date().getFullYear()} EchoScribe AI. 基于 React & Gemini 构建。</p>
+        <p>&copy; {new Date().getFullYear()} 星声记. 基于 React & FunASR 构建。</p>
       </footer>
 
     </div>

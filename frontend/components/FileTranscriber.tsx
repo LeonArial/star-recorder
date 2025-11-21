@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { UploadCloud, FileAudio, Loader2, CheckCircle2, AlertCircle, Copy } from 'lucide-react';
-import { transcribeAudioFile } from '../services/geminiService';
+import { transcribeAudioFile } from '../services/asrService';
 
 const FileTranscriber: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);

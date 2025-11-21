@@ -471,6 +471,9 @@ def handle_stop_recording():
     print(f"🛑 停止录音: {session_id}")
     asr = active_sessions[session_id]
     
+    # 通知前端录音已停止，开始LLM处理
+    emit('recording_stopped', {'message': '录音已停止，开始LLM纠错'})
+    
     # 生成最终结果
     final_result = asr.finalize()
     emit('final_result', final_result)
@@ -633,6 +636,7 @@ if __name__ == '__main__':
     print("  - audio_data                 发送音频数据")
     print("  - stop_recording             停止录音")
     print("  - transcription              接收实时识别")
+    print("  - recording_stopped          录音已停止，开始LLM处理")
     print("  - final_result               接收最终结果")
     print("=" * 60)
     print("🌐 访问地址: http://localhost:5006")
