@@ -1,0 +1,256 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "语音识别API服务",
+    "description": "基于FunASR的智能语音识别API服务\n\n**核心功能：**\n- 🚀 Paraformer 实时流式识别（速度快）\n- ✨ SenseVoice 完整音频识别（准确度高）\n- 🤖 LLM 智能合并纠错（质量最优）\n\n**技术栈：**\n- ASR模型: paraformer-zh-streaming\n- 标点模型: ct-punc\n- 复检模型: iic/SenseVoiceSmall\n- LLM模型: qwen3:8b",
+    "version": "1.0.0",
+    "contact": {
+      "name": "API Support"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5006",
+      "description": "本地开发服务器"
+    },
+    {
+      "url": "http://10.8.75.207:5006",
+      "description": "内网测试服务器"
+    }
+  ],
+  "tags": [
+    {
+      "name": "系统管理",
+      "description": "系统健康检查和状态查询"
+    },
+    {
+      "name": "语音识别",
+      "description": "音频转录相关接口"
+    },
+    {
+      "name": "模型信息",
+      "description": "模型配置和支持格式查询"
+    }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": ["系统管理"],
+        "summary": "健康检查",
+        "description": "检查API服务是否正常运行，模型是否已加载",
+        "operationId": "healthCheck",
+        "responses": {
+          "200": {
+            "description": "服务正常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "message": {
+                      "type": "string",
+                      "example": "ASR API服务正常运行"
+                    },
+                    "models_loaded": {
+                      "type": "boolean",
+                      "example": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/transcribe": {
+      "post": {
+        "tags": ["语音识别"],
+        "summary": "音频转录",
+        "description": "上传音频文件进行转录，返回三种识别结果的对比",
+        "operationId": "transcribeAudio",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "音频文件"
+                  },
+                  "hotwords": {
+                    "type": "string",
+                    "description": "专业词汇，多个词汇用逗号分隔",
+                    "example": "会议纪要,实时转录,语音识别"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "转录成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "paraformer": {
+                          "type": "object",
+                          "properties": {
+                            "text": {"type": "string"},
+                            "length": {"type": "integer"}
+                          }
+                        },
+                        "sensevoice": {
+                          "type": "object",
+                          "properties": {
+                            "text": {"type": "string"},
+                            "length": {"type": "integer"}
+                          }
+                        },
+                        "llm_merged": {
+                          "type": "object",
+                          "properties": {
+                            "text": {"type": "string"},
+                            "length": {"type": "integer"}
+                          }
+                        }
+                      }
+                    },
+                    "filename": {
+                      "type": "string"
+                    },
+                    "hotwords": {
+                      "type": "array",
+                      "items": {"type": "string"},
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务器内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/models": {
+      "get": {
+        "tags": ["模型信息"],
+        "summary": "获取模型信息",
+        "operationId": "getModelsInfo",
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"type": "boolean"},
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "asr_model": {"type": "string"},
+                        "punc_model": {"type": "string"},
+                        "sensevoice_model": {"type": "string"},
+                        "llm_model": {"type": "string"},
+                        "models_loaded": {"type": "boolean"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/formats": {
+      "get": {
+        "tags": ["模型信息"],
+        "summary": "获取支持的音频格式",
+        "operationId": "getSupportedFormats",
+        "responses": {
+          "200": {
+            "description": "查询成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"type": "boolean"},
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "formats": {
+                          "type": "array",
+                          "items": {"type": "string"}
+                        },
+                        "description": {"type": "string"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["success", "error"],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "example": false
+          },
+          "error": {
+            "type": "string",
+            "description": "错误信息"
+          }
+        }
+      }
+    }
+  }
+}

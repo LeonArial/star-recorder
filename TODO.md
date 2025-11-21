@@ -307,6 +307,39 @@
     - 仅在SenseVoice遗漏时参考Paraformer补充
     - 差异情况默认以SenseVoice为准
   - **过滤思考内容**：使用正则表达式过滤LLM输出中的`<think></think>`标签
+- [x] **改造为RESTful API接口** (2025-11-20)
+  - 创建独立的API服务器 `asr_api_server.py`
+  - 实现四个REST接口：
+    - `GET /api/health` - 健康检查
+    - `POST /api/asr/transcribe` - 音频转录（核心接口）
+    - `GET /api/asr/models` - 模型信息查询
+    - `GET /api/asr/formats` - 支持格式查询
+  - 支持文件上传（multipart/form-data）
+  - 支持热词参数（可选）
+  - 返回三种识别结果的JSON格式对比
+  - 生成OpenAPI 3.0规范文档（YAML和JSON格式）
+  - 编写完整的API使用文档 `API_README.md`
+  - 创建API测试脚本 `test_asr_api.py`
+  - 可直接导入到Apifox等API管理工具
+  - **修复MP3格式支持** (2025-11-20)
+    - 添加 librosa 库支持多种音频格式
+    - 上传的音频统一转换为 WAV 格式（16kHz, 单声道）
+    - 确保 Paraformer 和 SenseVoice 都能正确处理各种格式
+    - 更新依赖文件 requirements_api.txt
+- [x] **重构API为两种模式** (2025-11-20)
+  - **模式一：实时录音（WebSocket）**
+    - Paraformer 实时流式识别（600ms延迟）
+    - SenseVoice 完整音频识别
+    - LLM 智能合并纠错
+    - 返回三种结果对比
+  - **模式二：文件上传（REST API）**
+    - 仅使用 SenseVoice 识别（高准确度）
+    - 不调用 Paraformer 和 LLM
+    - 直接返回 SenseVoice 结果
+  - 添加 WebSocket 事件处理
+  - 添加 RealtimeASR 类处理实时录音
+  - 更新测试脚本适配新格式
+  - 添加 flask-socketio 依赖
 
 ---
 

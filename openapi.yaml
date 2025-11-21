@@ -1,0 +1,360 @@
+openapi: 3.0.3
+info:
+  title: 语音识别API服务
+  description: |
+    基于FunASR的智能语音识别API服务
+    
+    **核心功能：**
+    - 🚀 Paraformer 实时流式识别（速度快）
+    - ✨ SenseVoice 完整音频识别（准确度高）
+    - 🤖 LLM 智能合并纠错（质量最优）
+    
+    **技术栈：**
+    - ASR模型: paraformer-zh-streaming
+    - 标点模型: ct-punc
+    - 复检模型: iic/SenseVoiceSmall
+    - LLM模型: qwen3:8b
+    
+    **使用建议：**
+    - 优先使用 llm_merged 结果（综合最优）
+    - 需要快速结果时使用 paraformer
+    - 需要高准确度时使用 sensevoice
+    
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:5006
+    description: 本地开发服务器
+  - url: http://10.8.75.207:5006
+    description: 内网测试服务器
+
+tags:
+  - name: 系统管理
+    description: 系统健康检查和状态查询
+  - name: 语音识别
+    description: 音频转录相关接口
+  - name: 模型信息
+    description: 模型配置和支持格式查询
+
+paths:
+  /api/health:
+    get:
+      tags:
+        - 系统管理
+      summary: 健康检查
+      description: 检查API服务是否正常运行，模型是否已加载
+      operationId: healthCheck
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                    description: 服务状态
+                  message:
+                    type: string
+                    example: ASR API服务正常运行
+                  models_loaded:
+                    type: boolean
+                    example: true
+                    description: 模型是否已加载
+              examples:
+                success:
+                  summary: 服务正常
+                  value:
+                    status: ok
+                    message: ASR API服务正常运行
+                    models_loaded: true
+
+  /api/asr/transcribe:
+    post:
+      tags:
+        - 语音识别
+      summary: 音频转录
+      description: |
+        上传音频文件进行转录，返回三种识别结果的对比：
+        
+        1. **Paraformer**: 实时流式识别，速度快但准确度相对较低
+        2. **SenseVoice**: 完整音频识别，准确度高，质量可靠
+        3. **LLM合并**: 智能合并两种结果，准确度最高（推荐使用）
+        
+        **支持的音频格式**: wav, mp3, ogg, flac, m4a, aac, wma
+        
+        **可选参数**:
+        - hotwords: 专业词汇，多个词汇用逗号分隔，LLM会优先使用这些词汇
+      operationId: transcribeAudio
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 音频文件（支持 wav, mp3, ogg, flac, m4a, aac, wma）
+                hotwords:
+                  type: string
+                  description: 专业词汇，多个词汇用逗号分隔（可选）
+                  example: 会议纪要,实时转录,语音识别
+            examples:
+              basic:
+                summary: 基础转录（无热词）
+                value:
+                  file: (binary)
+              with_hotwords:
+                summary: 带热词的转录
+                value:
+                  file: (binary)
+                  hotwords: 会议纪要,实时转录,语音识别,FunASR
+      responses:
+        '200':
+          description: 转录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      paraformer:
+                        type: object
+                        properties:
+                          text:
+                            type: string
+                            description: Paraformer识别结果
+                          length:
+                            type: integer
+                            description: 文本字数
+                      sensevoice:
+                        type: object
+                        properties:
+                          text:
+                            type: string
+                            description: SenseVoice识别结果
+                          length:
+                            type: integer
+                            description: 文本字数
+                      llm_merged:
+                        type: object
+                        properties:
+                          text:
+                            type: string
+                            description: LLM智能合并结果（推荐使用）
+                          length:
+                            type: integer
+                            description: 文本字数
+                  filename:
+                    type: string
+                    description: 上传的文件名
+                  hotwords:
+                    type: array
+                    items:
+                      type: string
+                    nullable: true
+                    description: 使用的热词列表
+              examples:
+                success:
+                  summary: 转录成功示例
+                  value:
+                    success: true
+                    data:
+                      paraformer:
+                        text: 测试一测试二会议纪要一会议纪要二会议纪要三
+                        length: 22
+                      sensevoice:
+                        text: 测试一、测试二，会议纪要一、会议纪要二、会议纪要三。
+                        length: 27
+                      llm_merged:
+                        text: 测试一、测试二，会议纪要一、会议纪要二、会议纪要三。
+                        length: 27
+                    filename: test_audio.wav
+                    hotwords: 
+                      - 会议纪要
+                      - 实时转录
+        '400':
+          description: 请求错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                no_file:
+                  summary: 未上传文件
+                  value:
+                    success: false
+                    error: 未找到上传的文件，请使用 'file' 字段上传音频文件
+                empty_filename:
+                  summary: 文件名为空
+                  value:
+                    success: false
+                    error: 文件名为空
+                invalid_format:
+                  summary: 不支持的文件格式
+                  value:
+                    success: false
+                    error: 不支持的文件格式，支持的格式: wav, mp3, ogg, flac, m4a, aac, wma
+        '500':
+          description: 服务器内部错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                processing_error:
+                  summary: 处理错误
+                  value:
+                    success: false
+                    error: Paraformer识别失败: 音频格式解析错误
+
+  /api/asr/models:
+    get:
+      tags:
+        - 模型信息
+      summary: 获取模型信息
+      description: 查询当前使用的ASR模型、标点模型、SenseVoice模型和LLM模型的信息
+      operationId: getModelsInfo
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      asr_model:
+                        type: string
+                        example: paraformer-zh-streaming
+                        description: ASR模型名称
+                      punc_model:
+                        type: string
+                        example: ct-punc
+                        description: 标点模型名称
+                      sensevoice_model:
+                        type: string
+                        example: iic/SenseVoiceSmall
+                        description: SenseVoice模型名称
+                      llm_model:
+                        type: string
+                        example: qwen3:8b
+                        description: LLM模型名称
+                      models_loaded:
+                        type: boolean
+                        example: true
+                        description: 模型是否已加载
+              examples:
+                success:
+                  summary: 模型信息
+                  value:
+                    success: true
+                    data:
+                      asr_model: paraformer-zh-streaming
+                      punc_model: ct-punc
+                      sensevoice_model: iic/SenseVoiceSmall
+                      llm_model: qwen3:8b
+                      models_loaded: true
+
+  /api/asr/formats:
+    get:
+      tags:
+        - 模型信息
+      summary: 获取支持的音频格式
+      description: 查询API支持的音频文件格式列表
+      operationId: getSupportedFormats
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      formats:
+                        type: array
+                        items:
+                          type: string
+                        example: 
+                          - wav
+                          - mp3
+                          - ogg
+                          - flac
+                          - m4a
+                          - aac
+                          - wma
+                      description:
+                        type: string
+                        example: 支持的音频文件格式
+              examples:
+                success:
+                  summary: 支持的格式
+                  value:
+                    success: true
+                    data:
+                      formats:
+                        - wav
+                        - mp3
+                        - ogg
+                        - flac
+                        - m4a
+                        - aac
+                        - wma
+                      description: 支持的音频文件格式
+
+components:
+  schemas:
+    Error:
+      type: object
+      required:
+        - success
+        - error
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          description: 错误信息
+          example: 文件格式不支持
+    
+    TranscriptionResult:
+      type: object
+      properties:
+        text:
+          type: string
+          description: 识别的文本内容
+        length:
+          type: integer
+          description: 文本字数
+      required:
+        - text
+        - length
