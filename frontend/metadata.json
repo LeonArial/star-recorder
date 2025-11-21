@@ -1,0 +1,7 @@
+{
+  "name": "EchoScribe AI",
+  "description": "一个由 Gemini 驱动的美观、极简的实时语音转写和音频文件分析工具。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
