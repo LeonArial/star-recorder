@@ -6,6 +6,7 @@
 import os
 import tempfile
 import wave
+import json
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
@@ -35,6 +36,12 @@ LLM_MODEL = "qwen3:8b"
 
 # 支持的音频格式
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'wma'}
+
+# 热词配置文件路径
+HOTWORDS_FILE = os.path.join(os.path.dirname(__file__), 'hotwords.json')
+
+# 热词缓存
+hotwords_cache = []
 
 # 存储实时录音会话
 active_sessions = {}
@@ -75,6 +82,32 @@ def init_models():
         )
         
         print("✅ 所有模型加载完成！")
+
+
+def load_hotwords():
+    """从JSON文件加载热词列表"""
+    global hotwords_cache
+    
+    try:
+        if os.path.exists(HOTWORDS_FILE):
+            with open(HOTWORDS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                hotwords_cache = data.get('hotwords', [])
+                print(f"📝 已加载 {len(hotwords_cache)} 个热词")
+                return hotwords_cache
+        else:
+            print(f"⚠️ 热词文件不存在: {HOTWORDS_FILE}")
+            hotwords_cache = []
+            return []
+    except Exception as e:
+        print(f"❌ 加载热词失败: {str(e)}")
+        hotwords_cache = []
+        return []
+
+
+def reload_hotwords():
+    """重新加载热词（可用于运行时更新热词）"""
+    return load_hotwords()
 
 
 def allowed_file(filename):
@@ -167,7 +200,7 @@ def _run_sensevoice_array(audio_array, sample_rate):
         raise Exception(f"SenseVoice识别失败: {str(e)}")
 
 
-def _call_llm_merge(paraformer_text, sensevoice_text, hotwords=None):
+def _call_llm_merge(paraformer_text, sensevoice_text):
     """调用LLM对两个识别结果进行检查、纠错、合并"""
     
     # 构建系统提示词
@@ -188,10 +221,10 @@ def _call_llm_merge(paraformer_text, sensevoice_text, hotwords=None):
    - 不要添加不存在的内容
 """
 
-    # 如果有热词，添加到提示词中
-    if hotwords and len(hotwords) > 0:
-        hotword_list = "、".join(hotwords)
-        system_prompt += f"\n\n4. **专业词汇**（优先使用这些词汇）：\n{hotword_list}"
+    # 从全局缓存读取热词并添加到提示词中
+    if hotwords_cache and len(hotwords_cache) > 0:
+        hotword_list = "、".join(hotwords_cache)
+        system_prompt += f"\n\n4. **自定义词匹配替换**（优先使用以下自定义词替换识别结果中的可能错误的词）：\n{hotword_list}"
     
     # 构建用户输入
     user_content = f"""请检查、纠错并合并以下两个语音识别结果：
@@ -612,6 +645,43 @@ def get_supported_formats():
     }), 200
 
 
+@app.route('/api/asr/hotwords', methods=['GET'])
+def get_hotwords():
+    """
+    获取当前加载的热词列表
+    """
+    return jsonify({
+        "success": True,
+        "data": {
+            "hotwords": hotwords_cache,
+            "count": len(hotwords_cache),
+            "file_path": HOTWORDS_FILE
+        }
+    }), 200
+
+
+@app.route('/api/asr/hotwords/reload', methods=['POST'])
+def reload_hotwords_api():
+    """
+    重新加载热词配置（无需重启服务器）
+    """
+    try:
+        hotwords = reload_hotwords()
+        return jsonify({
+            "success": True,
+            "message": "热词重新加载成功",
+            "data": {
+                "hotwords": hotwords,
+                "count": len(hotwords)
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("📣 语音识别API服务器")
@@ -625,10 +695,12 @@ if __name__ == '__main__':
     print("     - 仅 SenseVoice 识别（高准确度）")
     print("=" * 60)
     print("🔧 REST API接口:")
-    print("  - GET  /api/health          健康检查")
-    print("  - POST /api/asr/transcribe  文件转录（仅SenseVoice）")
-    print("  - GET  /api/asr/models      模型信息")
-    print("  - GET  /api/asr/formats     支持格式")
+    print("  - GET  /api/health              健康检查")
+    print("  - POST /api/asr/transcribe      文件转录（仅SenseVoice）")
+    print("  - GET  /api/asr/models          模型信息")
+    print("  - GET  /api/asr/formats         支持格式")
+    print("  - GET  /api/asr/hotwords        获取热词列表")
+    print("  - POST /api/asr/hotwords/reload 重新加载热词")
     print("")
     print("🔌 WebSocket接口:")
     print("  - connect                    建立连接")
@@ -644,6 +716,9 @@ if __name__ == '__main__':
     
     # 初始化模型
     init_models()
+    
+    # 加载热词
+    load_hotwords()
     
     # 启动服务（使用socketio.run支持WebSocket）
     socketio.run(app, host='0.0.0.0', port=5006, debug=False, allow_unsafe_werkzeug=True)
