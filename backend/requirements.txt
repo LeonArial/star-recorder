@@ -1,10 +1,17 @@
 # ASR API 服务器依赖
 # 用于 asr_api_server.py
 
+# 深度学习框架（FunASR依赖）
+# 注意: torch和torchaudio在Dockerfile中单独安装（支持CUDA）
+# torch>=2.0.0
+# torchaudio>=2.0.0
+
 # Web框架
 flask>=2.3.0
 flask-socketio>=5.3.0
 flask-cors>=4.0.0
+python-socketio>=5.9.0
+eventlet>=0.33.0
 
 # FunASR 语音识别
 funasr>=1.0.0
@@ -19,4 +26,9 @@ scipy>=1.10.0
 requests>=2.31.0
 
 # 数据处理
-numpy>=1.24.0
+numpy>=1.24.0,<2.0.0
+
+# FunASR额外依赖
+onnxruntime-gpu>=1.15.0
+kaldiio>=2.18.0
+typeguard>=2.13.3

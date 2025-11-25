@@ -54,29 +54,42 @@ def init_models():
     if asr_model is None:
         print("🔄 正在加载模型...")
         
+        # 检测设备（GPU优先，无GPU则使用CPU）
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = "cuda:0"
+                print(f"✅ 检测到GPU: {torch.cuda.get_device_name(0)}")
+            else:
+                device = "cpu"
+                print("⚠️ 未检测到GPU，使用CPU模式（性能较低）")
+        except:
+            device = "cpu"
+            print("⚠️ 使用CPU模式")
+        
         # 加载中文流式 ASR 模型
-        print("  - 加载 ASR 模型: paraformer-zh-streaming")
+        print(f"  - 加载 ASR 模型: paraformer-zh-streaming (设备: {device})")
         asr_model = AutoModel(
             model="paraformer-zh-streaming",
-            device="cuda:0",
+            device=device,
             disable_update=True,
         )
         
         # 加载标点恢复模型
-        print("  - 加载标点模型: ct-punc")
+        print(f"  - 加载标点模型: ct-punc (设备: {device})")
         punc_model = AutoModel(
             model="ct-punc",
-            device="cuda:0",
+            device=device,
             disable_update=True,
         )
         
         # SenseVoice 复检模型（配置VAD）
-        print("  - 加载复检模型: SenseVoiceSmall")
+        print(f"  - 加载复检模型: SenseVoiceSmall (设备: {device})")
         sensevoice_model = AutoModel(
             model="iic/SenseVoiceSmall",
             vad_model="fsmn-vad",
             vad_kwargs={"max_single_segment_time": 30000},
-            device="cuda:0",
+            device=device,
             disable_update=True,
             use_itn=True,
         )
