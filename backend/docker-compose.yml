@@ -1,21 +1,19 @@
-version: '3.8'
-
 services:
   asr-api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: star-recorder-asr
-    image: star-recorder-asr:latest
+    image: 10.8.101.91/autoreport/star_recorder
     
-    # GPU支持（需要安装nvidia-docker）
+    # GPU支持（推荐方式）
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+              count: all
+              capabilities: [gpu, compute, utility]
     
     # 端口映射
     ports:

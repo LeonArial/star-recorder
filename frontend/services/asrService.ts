@@ -4,7 +4,7 @@
  */
 
 // 后端 API 地址配置
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5006';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.8.75.202:5006';
 
 /**
  * 文件上传转录接口

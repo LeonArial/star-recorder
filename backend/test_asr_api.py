@@ -5,10 +5,11 @@ ASR API 测试脚本
 import requests
 import json
 import os
+from pathlib import Path
 
 # API配置
-BASE_URL = "http://localhost:5006"
-# BASE_URL = "http://10.8.75.207:5006"  # 使用内网服务器
+# BASE_URL = "http://10.118.254.101:5006"
+BASE_URL = "http://10.8.75.202:5006"  # 使用内网服务器
 
 def test_health():
     """测试健康检查接口"""
@@ -152,18 +153,20 @@ def main():
     test_formats()
     
     # 测试音频转录
-    # 请修改为您的实际音频文件路径
-    audio_file = "test.mp3"  # 修改为实际的音频文件路径
+    # 使用脚本所在目录的test.mp3文件
+    script_dir = Path(__file__).parent
+    audio_file = script_dir / "test.mp3"
     
-    if os.path.exists(audio_file):
+    if audio_file.exists():
         # 测试文件转录（仅SenseVoice）
-        test_transcribe(audio_file)
+        test_transcribe(str(audio_file))
     else:
         print("=" * 60)
         print("⚠️  跳过音频转录测试")
         print("=" * 60)
         print(f"音频文件不存在: {audio_file}")
-        print("请将测试音频文件放在当前目录，或修改 audio_file 变量的路径")
+        print(f"脚本目录: {script_dir}")
+        print("请将测试音频文件放在backend目录，命名为 test.mp3")
         print()
     
     # 测试错误情况
