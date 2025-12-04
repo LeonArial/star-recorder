@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 
 # API配置
-# BASE_URL = "http://10.118.254.101:5006"
 BASE_URL = "http://10.8.75.202:5006"  # 使用内网服务器
 
 def test_health():

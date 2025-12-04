@@ -4,7 +4,8 @@
  */
 
 // 后端 API 地址配置
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://10.8.75.202:5006';
+// 使用相对路径，通过Nginx代理转发到后端（避免混合内容错误）
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 /**
  * 文件上传转录接口
