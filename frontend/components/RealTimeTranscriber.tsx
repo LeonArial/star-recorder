@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { Mic, MicOff, Loader2, Copy, Trash2, Download, Sparkles } from 'lucide-react';
 import AudioVisualizer from './AudioVisualizer';
+import AudioPlayer from './AudioPlayer';
 import { API_BASE_URL } from '../services/asrService';
 
 interface FinalResult {
@@ -230,107 +231,116 @@ const RealTimeTranscriber: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col w-full max-w-3xl mx-auto">
-      {/* Visualizer Area */}
-      <div className="relative w-full mb-6">
-        <AudioVisualizer stream={stream} isRecording={isRecording} />
-        
-        {/* Status Overlay */}
-        {!isRecording && !isConnecting && (
-          <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-xs md:text-sm font-medium pointer-events-none">
-            准备就绪
+    <div className="flex flex-col w-full max-w-4xl mx-auto gap-6">
+      {/* Top Section: Visualizer / Player & Controls */}
+      <div className="rounded-2xl p-6">
+        <div className="flex flex-col items-center gap-6">
+          
+          {/* Audio Visualization or Player */}
+          <div className="w-full">
+             {!isRecording && audioUrl ? (
+                <AudioPlayer audioUrl={audioUrl} />
+             ) : (
+                <div className="relative w-full h-32 rounded-xl overflow-hidden flex items-center justify-center">
+                   <AudioVisualizer stream={stream} isRecording={isRecording} />
+                   {!isRecording && !isConnecting && (
+                      <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm font-medium pointer-events-none">
+                        准备就绪，点击下方按钮开始录音
+                      </div>
+                   )}
+                </div>
+             )}
           </div>
-        )}
-      </div>
 
-      {/* Controls */}
-      <div className="flex items-center justify-center space-x-4 md:space-x-6 mb-6 md:mb-8">
-        {!isRecording ? (
-          <button
-            onClick={startRecording}
-            disabled={isConnecting}
-            className={`group relative flex items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-full transition-all duration-300 ${
-              isConnecting 
-              ? 'bg-slate-200 cursor-not-allowed' 
-              : 'bg-slate-900 hover:bg-indigo-600 shadow-lg hover:shadow-indigo-500/30 hover:scale-105'
-            }`}
-          >
-            {isConnecting ? (
-              <Loader2 className="w-5 h-5 md:w-6 md:h-6 text-slate-500 animate-spin" />
+          {/* Controls */}
+          <div className="flex items-center gap-4">
+            {!isRecording ? (
+              <button
+                onClick={startRecording}
+                disabled={isConnecting}
+                className={`flex items-center gap-2 px-8 py-3 rounded-full font-semibold text-white shadow-lg transition-all active:scale-95 ${
+                    isConnecting
+                    ? 'bg-slate-300 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/30 hover:shadow-blue-500/40'
+                }`}
+              >
+                {isConnecting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Mic className="w-5 h-5" />}
+                {isConnecting ? '连接中...' : (audioUrl ? '重新录音' : '开始录音')}
+              </button>
             ) : (
-              <Mic className="w-5 h-5 md:w-6 md:h-6 text-white group-hover:text-white" />
+              <button
+                onClick={stopRecording}
+                className="flex items-center gap-2 px-8 py-3 rounded-full font-semibold text-white bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/30 hover:shadow-red-500/40 transition-all active:scale-95"
+              >
+                <MicOff className="w-5 h-5" />
+                停止录音
+              </button>
             )}
-          </button>
-        ) : (
-          <button
-            onClick={stopRecording}
-            className="group flex items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-full bg-red-500 hover:bg-red-600 shadow-lg hover:shadow-red-500/30 transition-all duration-300 hover:scale-105"
-          >
-            <MicOff className="w-5 h-5 md:w-6 md:h-6 text-white" />
-          </button>
-        )}
-        
+            
+             {/* Download Button (Small) */}
+             {!isRecording && audioUrl && (
+               <a
+                href={audioUrl}
+                download={`recording-${new Date().toISOString()}.webm`}
+                className="p-3 rounded-full border border-slate-200 text-slate-600 hover:text-blue-600 hover:bg-blue-50 transition-all"
+                title="下载录音"
+               >
+                 <Download className="w-5 h-5" />
+               </a>
+             )}
+          </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="text-sm text-red-600 bg-red-50 px-4 py-2 rounded-lg border border-red-100">
+              {error}
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Audio Download Option */}
-      {!isRecording && audioUrl && (
-        <div className="flex justify-center mb-6">
-           <a
-            href={audioUrl}
-            download={`recording-${new Date().toISOString()}.webm`}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-full text-xs md:text-sm font-medium text-slate-600 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all shadow-sm active:scale-95"
-          >
-            <Download className="w-3.5 h-3.5 md:w-4 md:h-4" />
-            下载录音文件
-          </a>
+      {/* Bottom Section: Transcript */}
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm flex flex-col overflow-hidden min-h-[400px]">
+        {/* Toolbar */}
+        <div className="border-b border-slate-100 px-4 py-3 flex items-center justify-between bg-slate-50/50">
+            <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-slate-700">转写结果</span>
+                {isProcessingLLM && (
+                    <div className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs font-medium border border-blue-100">
+                        <Sparkles className="w-3 h-3 animate-pulse" />
+                        AI 优化中...
+                    </div>
+                )}
+            </div>
+            <div className="flex items-center gap-1">
+                <button 
+                    onClick={() => handleCopy(transcript)}
+                    disabled={!transcript}
+                    className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+                    title="复制全部"
+                >
+                    <Copy className="w-4 h-4" />
+                </button>
+                <button 
+                    onClick={handleClear}
+                    disabled={!transcript}
+                    className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+                    title="清空"
+                >
+                    <Trash2 className="w-4 h-4" />
+                </button>
+            </div>
         </div>
-      )}
 
-      {/* Error Message */}
-      {error && (
-        <div className="mb-4 p-3 md:p-4 bg-red-50 border border-red-100 text-red-600 rounded-lg text-xs md:text-sm text-center">
-          {error}
+        {/* Text Area */}
+        <div className="flex-1 relative">
+             <textarea
+                readOnly
+                value={transcript}
+                placeholder="等待录音..."
+                className="w-full h-full p-6 resize-none outline-none text-slate-700 text-sm leading-relaxed bg-transparent font-sans"
+            />
         </div>
-      )}
-
-      {/* LLM处理中提示 */}
-      {isProcessingLLM && (
-        <div className="mb-4 flex items-center justify-center gap-3 p-3 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl animate-in fade-in slide-in-from-top-2 duration-300">
-          <Sparkles className="w-5 h-5 text-indigo-600 animate-pulse" />
-          <span className="text-sm font-medium text-indigo-700">调用 Qwen3 纠错中...</span>
-          <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
-        </div>
-      )}
-
-      {/* Transcript Display */}
-      <div className="relative group">
-        <div className="absolute top-3 right-3 md:top-4 md:right-4 flex space-x-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-200 z-10">
-          <button 
-            onClick={() => handleCopy(transcript)}
-            className="p-1.5 md:p-2 rounded-lg bg-white/90 hover:bg-white shadow-sm border border-slate-200 text-slate-500 hover:text-indigo-600 transition-colors"
-            title="复制"
-          >
-            <Copy className="w-3.5 h-3.5 md:w-4 md:h-4" />
-          </button>
-          <button 
-            onClick={handleClear}
-            className="p-1.5 md:p-2 rounded-lg bg-white/90 hover:bg-white shadow-sm border border-slate-200 text-slate-500 hover:text-red-500 transition-colors"
-            title="清空"
-          >
-            <Trash2 className="w-3.5 h-3.5 md:w-4 md:h-4" />
-          </button>
-        </div>
-        
-        <textarea
-          readOnly
-          value={transcript}
-          placeholder="开始录音后，此处将显示实时转写内容..."
-          className={`w-full h-72 md:h-96 p-4 md:p-6 rounded-xl md:rounded-2xl bg-white border shadow-sm resize-none focus:outline-none focus:ring-2 text-slate-700 text-base md:text-lg leading-relaxed transition-all duration-300 ${
-            isProcessingLLM 
-              ? 'border-indigo-300 focus:ring-indigo-500/20 opacity-75' 
-              : 'border-slate-100 focus:ring-indigo-500/10'
-          }`}
-        />
       </div>
     </div>
   );

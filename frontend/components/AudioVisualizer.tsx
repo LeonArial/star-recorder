@@ -62,8 +62,8 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ stream, isRecording }
 
       // Soft gradient
       const gradient = ctx.createLinearGradient(0, height, 0, 0);
-      gradient.addColorStop(0, 'rgba(99, 102, 241, 0.2)'); // Indigo-500 low opacity
-      gradient.addColorStop(1, 'rgba(99, 102, 241, 0.8)'); // Indigo-500 high opacity
+      gradient.addColorStop(0, 'rgba(37, 99, 235, 0.2)'); // Blue-600 low opacity
+      gradient.addColorStop(1, 'rgba(37, 99, 235, 0.8)'); // Blue-600 high opacity
 
       ctx.fillStyle = gradient;
 
@@ -98,7 +98,7 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ stream, isRecording }
       ref={canvasRef} 
       width={600} 
       height={100} 
-      className="w-full h-24 rounded-xl bg-slate-50 border border-slate-100"
+      className="w-full h-24 rounded-xl"
     />
   );
 };
