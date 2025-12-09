@@ -41,6 +41,7 @@ punc_model = None
 punc_realtime_model = None  # 实时标点模型
 vad_model = None  # VAD语音端点检测模型
 sensevoice_model = None
+timestamp_model = None  # 时间戳预测模型
 
 # LLM配置
 LLM_API_URL = "http://10.8.75.207:9997/v1/chat/completions"
@@ -75,7 +76,7 @@ def init_models():
     - 如果模型不存在则自动下载到缓存目录
     - Docker运行时通过挂载卷持久化模型，避免重复下载
     """
-    global asr_model, punc_model, punc_realtime_model, vad_model, sensevoice_model
+    global asr_model, punc_model, punc_realtime_model, vad_model, sensevoice_model, timestamp_model
     
     if asr_model is None:
         print("🔄 正在加载模型...")
@@ -171,6 +172,16 @@ def init_models():
             device=device,
             disable_update=True,
             use_itn=True,
+        )
+        
+        # 时间戳预测模型（用于生成字级时间戳）
+        model_name = "fa-zh"
+        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
+        print(f"  - 加载时间戳模型: {model_name} {cached} (设备: {device})")
+        timestamp_model = AutoModel(
+            model=model_name,
+            device=device,
+            disable_update=True,
         )
         
         print("✅ 所有模型加载完成！")
@@ -296,6 +307,139 @@ def _run_sensevoice_array(audio_array, sample_rate):
         raise Exception(f"SenseVoice识别失败: {str(e)}")
 
 
+def _generate_timestamps(audio_array, sample_rate, text):
+    """使用 fa-zh 模型生成精确的字级时间戳
+    
+    Args:
+        audio_array: numpy float32 音频数组
+        sample_rate: 采样率
+        text: 要对齐的文本
+    
+    Returns:
+        list: 时间戳列表 [{'char': '字', 'start_ms': 0, 'end_ms': 100}, ...]
+    """
+    if not timestamp_model or not text:
+        return []
+    
+    try:
+        # 保存音频为临时文件
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_audio_path = temp_audio.name
+        temp_audio.close()
+        sf.write(temp_audio_path, audio_array, sample_rate)
+        
+        # 保存文本为临时文件
+        temp_text = tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w', encoding='utf-8')
+        temp_text_path = temp_text.name
+        # 移除标点符号，只保留文字（fa-zh 模型需要纯文本）
+        clean_text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', text)
+        temp_text.write(clean_text)
+        temp_text.close()
+        
+        # 调用时间戳模型
+        result = timestamp_model.generate(
+            input=(temp_audio_path, temp_text_path),
+            data_type=("sound", "text")
+        )
+        
+        # 清理临时文件
+        os.remove(temp_audio_path)
+        os.remove(temp_text_path)
+        
+        if not result or len(result) == 0:
+            return []
+        
+        # 解析时间戳结果
+        # fa-zh 输出格式: [{'text': '字', 'timestamp': [[start_s, end_s], ...]}]
+        timestamps = []
+        raw_result = result[0]
+        
+        if 'timestamp' in raw_result:
+            # fa-zh 输出格式: timestamp 已经是毫秒级 [[380, 560], [560, 800], ...]
+            chars = list(clean_text)
+            ts_list = raw_result['timestamp']
+            for i, ts in enumerate(ts_list):
+                if i < len(chars) and len(ts) >= 2:
+                    timestamps.append({
+                        'char': chars[i],
+                        'start_ms': int(ts[0]),  # 已经是毫秒，不需要 * 1000
+                        'end_ms': int(ts[1])
+                    })
+        elif 'value' in raw_result:
+            # 其他可能的格式
+            for item in raw_result['value']:
+                if isinstance(item, dict) and 'text' in item:
+                    timestamps.append({
+                        'char': item.get('text', ''),
+                        'start_ms': int(item.get('start', 0) * 1000),
+                        'end_ms': int(item.get('end', 0) * 1000)
+                    })
+        
+        # 将字级时间戳聚合为词/句级时间戳（便于前端显示）
+        segments = _aggregate_timestamps(timestamps, text)
+        
+        return segments
+        
+    except Exception as e:
+        print(f"⚠️ 时间戳生成错误: {str(e)}")
+        traceback.print_exc()
+        return []
+
+
+def _aggregate_timestamps(char_timestamps, original_text):
+    """将字级时间戳聚合为句级时间戳
+    
+    根据原文中的标点符号进行分句，每句话对应一个时间段
+    """
+    if not char_timestamps:
+        return []
+    
+    segments = []
+    current_segment = {
+        'text': '',
+        'start_ms': char_timestamps[0]['start_ms'] if char_timestamps else 0,
+        'end_ms': 0,
+        'chars': []  # 保留字级时间戳供精确定位
+    }
+    
+    char_idx = 0
+    for char in original_text:
+        # 检查是否是标点符号（用于分句）
+        is_punctuation = char in '，。！？；：、,!?;:'
+        is_sentence_end = char in '。！？!?'
+        
+        if re.match(r'[\u4e00-\u9fa5a-zA-Z0-9]', char):
+            # 是文字字符，添加到当前片段
+            current_segment['text'] += char
+            if char_idx < len(char_timestamps):
+                current_segment['chars'].append(char_timestamps[char_idx])
+                current_segment['end_ms'] = char_timestamps[char_idx]['end_ms']
+                char_idx += 1
+        elif is_punctuation:
+            # 是标点符号，添加到文本但不影响时间戳
+            current_segment['text'] += char
+            
+            # 如果是句末标点，结束当前片段
+            if is_sentence_end and current_segment['text'].strip():
+                segments.append(current_segment)
+                # 开始新片段
+                next_start = current_segment['end_ms']
+                if char_idx < len(char_timestamps):
+                    next_start = char_timestamps[char_idx]['start_ms']
+                current_segment = {
+                    'text': '',
+                    'start_ms': next_start,
+                    'end_ms': next_start,
+                    'chars': []
+                }
+    
+    # 添加最后一个片段
+    if current_segment['text'].strip():
+        segments.append(current_segment)
+    
+    return segments
+
+
 def _call_llm_merge(paraformer_text, sensevoice_text):
     """调用LLM对两个识别结果进行检查、纠错、合并"""
     
@@ -413,6 +557,11 @@ class RealtimeASR:
         
         # 完整录音缓存（用于 SenseVoice 最终识别）
         self.full_audio = []
+        
+        # 实时时间戳跟踪
+        self.asr_processed_ms = 0  # ASR 已处理的音频时长（毫秒）
+        self.segments = []  # 带时间戳的文本片段列表 [{text, start_ms, end_ms}, ...]
+        self.current_segment_start = 0  # 当前片段起始时间
         
     def add_audio(self, audio_data):
         """添加音频数据到缓冲区"""
@@ -545,6 +694,11 @@ class RealtimeASR:
             speech_chunk = np.array(self.audio_buffer[:self.asr_chunk_stride], dtype=np.float32)
             self.audio_buffer = self.audio_buffer[self.asr_chunk_stride:]
             
+            # 记录当前 chunk 的时间范围
+            chunk_start_ms = self.asr_processed_ms
+            chunk_end_ms = chunk_start_ms + 600  # 每个 chunk 600ms
+            self.asr_processed_ms = chunk_end_ms
+            
             # 流式 ASR 识别
             asr_result = asr_model.generate(
                 input=speech_chunk,
@@ -557,6 +711,7 @@ class RealtimeASR:
             
             text = ""
             punc_text = ""
+            current_segment = None
             
             if asr_result and len(asr_result) > 0:
                 text = asr_result[0].get("text", "")
@@ -582,6 +737,17 @@ class RealtimeASR:
                         # 使用实时标点模型
                         punc_text = self._apply_realtime_punc(self.pending_text)
                         self.text_with_punc += punc_text
+                        
+                        # 记录带时间戳的片段（实时粗略时间戳）
+                        current_segment = {
+                            'text': punc_text,
+                            'start_ms': self.current_segment_start,
+                            'end_ms': chunk_end_ms
+                        }
+                        self.segments.append(current_segment)
+                        
+                        # 更新下一个片段的起始时间
+                        self.current_segment_start = chunk_end_ms
                         self.pending_text = ""
                         
                         # 如果是 VAD 结束事件，重置句子缓冲区
@@ -594,7 +760,9 @@ class RealtimeASR:
                 "full_text": self.text_with_punc + self.pending_text,
                 "is_final": False,
                 "vad_event": vad_event,
-                "is_speech_active": self.is_speech_active
+                "is_speech_active": self.is_speech_active,
+                "segment": current_segment,  # 当前片段的时间戳信息
+                "current_time_ms": chunk_end_ms  # 当前音频时间
             }
             
         except Exception as e:
@@ -652,6 +820,23 @@ class RealtimeASR:
                 llm_merged_text = _call_llm_merge(paraformer_text, sensevoice_text)
                 print(f"✅ LLM合并文本: {llm_merged_text} ({len(llm_merged_text)}字)")
             
+            # 使用 fa-zh 模型为 LLM 纠错后的文本生成精确字级时间戳
+            timestamps = []
+            final_text = llm_merged_text or sensevoice_text or paraformer_text
+            if final_text and len(self.full_audio) > 0 and timestamp_model:
+                print(f"🕐 开始生成精确时间戳...")
+                try:
+                    timestamps = _generate_timestamps(
+                        np.array(self.full_audio, dtype=np.float32),
+                        self.sample_rate,
+                        final_text
+                    )
+                    print(f"✅ 时间戳生成完成: {len(timestamps)} 个片段")
+                except Exception as e:
+                    print(f"⚠️ 时间戳生成失败: {str(e)}")
+                    # 如果精确时间戳失败，使用实时时间戳作为备选
+                    timestamps = self.segments
+            
             return {
                 'paraformer': paraformer_text,
                 'sensevoice': sensevoice_text,
@@ -659,6 +844,8 @@ class RealtimeASR:
                 'paraformer_length': len(paraformer_text),
                 'sensevoice_length': len(sensevoice_text),
                 'llm_merged_length': len(llm_merged_text),
+                'timestamps': timestamps,  # 精确字级时间戳
+                'realtime_segments': self.segments,  # 实时粗略时间戳（备用）
             }
             
         except Exception as e:

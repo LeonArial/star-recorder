@@ -78,6 +78,11 @@ def download_models():
                 "disable_update": True,
                 "use_itn": True
             }
+        },
+        {
+            "name": "fa-zh",
+            "description": "时间戳预测模型（字级对齐）",
+            "kwargs": {"model": "fa-zh", "disable_update": True}
         }
     ]
     
