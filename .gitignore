@@ -38,3 +38,5 @@ backend/logs/
 # 模型缓存（Docker挂载目录）
 backend/models_cache/
 backend/hf_cache/
+
+show

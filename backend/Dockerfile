@@ -47,11 +47,11 @@ RUN pip3 install --no-cache-dir \
     "numpy>=1.24.0,<2.0.0" \
     "scipy>=1.10.0"
 
-# 复制依赖文件
-COPY requirements.txt /app/
+# 复制依赖文件（GPU 版本）
+COPY requirements-gpu.txt /app/
 
 # 安装其他Python依赖
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements-gpu.txt
 
 # 复制应用代码
 COPY asr_api_server.py /app/

@@ -22,11 +22,24 @@ import traceback
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'asr-api-server'
 CORS(app)  # 允许跨域请求
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# SocketIO 配置（优化长时间录音稳定性）
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading',
+    # 增加 ping 超时时间（默认20秒太短，长时间录音可能超时）
+    ping_timeout=120,  # 120秒超时
+    ping_interval=30,  # 每30秒发送一次ping
+    # 增加最大缓冲区大小（支持更大的音频数据帧）
+    max_http_buffer_size=10 * 1024 * 1024,  # 10MB
+)
 
 # 全局模型实例
 asr_model = None
 punc_model = None
+punc_realtime_model = None  # 实时标点模型
+vad_model = None  # VAD语音端点检测模型
 sensevoice_model = None
 
 # LLM配置
@@ -40,6 +53,13 @@ ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'wma'}
 # 热词配置文件路径
 HOTWORDS_FILE = os.path.join(os.path.dirname(__file__), 'hotwords.json')
 
+# 模型缓存目录（Docker挂载或本地目录）
+# 优先使用环境变量，其次使用项目目录下的 models_cache
+MODELS_CACHE_DIR = os.environ.get('MODELSCOPE_CACHE', 
+    os.path.join(os.path.dirname(__file__), 'models_cache'))
+HF_CACHE_DIR = os.environ.get('HF_HOME',
+    os.path.join(os.path.dirname(__file__), 'hf_cache'))
+
 # 热词缓存
 hotwords_cache = []
 
@@ -48,45 +68,104 @@ active_sessions = {}
 
 
 def init_models():
-    """初始化 ASR、标点与复检模型"""
-    global asr_model, punc_model, sensevoice_model
+    """初始化 ASR、标点、VAD与复检模型
+    
+    模型缓存策略：
+    - 优先从 MODELSCOPE_CACHE 目录加载已有模型
+    - 如果模型不存在则自动下载到缓存目录
+    - Docker运行时通过挂载卷持久化模型，避免重复下载
+    """
+    global asr_model, punc_model, punc_realtime_model, vad_model, sensevoice_model
     
     if asr_model is None:
         print("🔄 正在加载模型...")
         
-        # 检测设备（GPU优先，无GPU则使用CPU）
+        # 设置模型缓存环境变量（确保FunASR使用正确的缓存路径）
+        os.environ['MODELSCOPE_CACHE'] = MODELS_CACHE_DIR
+        os.environ['HF_HOME'] = HF_CACHE_DIR
+        
+        # 确保缓存目录存在
+        os.makedirs(MODELS_CACHE_DIR, exist_ok=True)
+        os.makedirs(HF_CACHE_DIR, exist_ok=True)
+        
+        print(f"📁 模型缓存目录: {MODELS_CACHE_DIR}")
+        print(f"📁 HuggingFace缓存目录: {HF_CACHE_DIR}")
+        
+        # 检测设备（CUDA GPU > Apple MPS > CPU）
         try:
             import torch
             if torch.cuda.is_available():
+                # NVIDIA GPU（Linux/Windows 服务器）
                 device = "cuda:0"
-                print(f"✅ 检测到GPU: {torch.cuda.get_device_name(0)}")
+                print(f"✅ 检测到 CUDA GPU: {torch.cuda.get_device_name(0)}")
+            elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+                # Apple Silicon MPS（M1/M2/M3/M4 Mac）
+                device = "mps"
+                print("✅ 检测到 Apple Silicon，使用 MPS 加速")
             else:
                 device = "cpu"
-                print("⚠️ 未检测到GPU，使用CPU模式（性能较低）")
-        except:
+                print("⚠️ 未检测到 GPU，使用 CPU 模式（性能较低）")
+        except Exception as e:
             device = "cpu"
-            print("⚠️ 使用CPU模式")
+            print(f"⚠️ 设备检测失败，使用 CPU 模式: {e}")
+        
+        # 检查模型是否已缓存
+        def check_model_cached(model_name):
+            """检查模型是否已在缓存中"""
+            # ModelScope模型通常缓存在 hub/模型名 目录下
+            model_path = os.path.join(MODELS_CACHE_DIR, 'hub', model_name.replace('/', '--'))
+            if os.path.exists(model_path):
+                return True
+            # 也检查直接的模型名目录
+            model_path_alt = os.path.join(MODELS_CACHE_DIR, 'hub', model_name)
+            return os.path.exists(model_path_alt)
         
         # 加载中文流式 ASR 模型
-        print(f"  - 加载 ASR 模型: paraformer-zh-streaming (设备: {device})")
+        model_name = "paraformer-zh-streaming"
+        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
+        print(f"  - 加载 ASR 模型: {model_name} {cached} (设备: {device})")
         asr_model = AutoModel(
-            model="paraformer-zh-streaming",
+            model=model_name,
             device=device,
             disable_update=True,
         )
         
-        # 加载标点恢复模型
-        print(f"  - 加载标点模型: ct-punc (设备: {device})")
+        # 加载标点恢复模型（离线，用于最终结果）
+        model_name = "ct-punc"
+        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
+        print(f"  - 加载标点模型: {model_name} {cached} (设备: {device})")
         punc_model = AutoModel(
-            model="ct-punc",
+            model=model_name,
+            device=device,
+            disable_update=True,
+        )
+        
+        # 加载实时标点模型（支持流式处理，带缓存）
+        model_name = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
+        cached = "(已缓存)" if check_model_cached(model_name) else "(首次下载)"
+        print(f"  - 加载实时标点模型: punc_realtime {cached} (设备: {device})")
+        punc_realtime_model = AutoModel(
+            model=model_name,
+            device=device,
+            disable_update=True,
+        )
+        
+        # 加载VAD语音端点检测模型（实时）
+        model_name = "fsmn-vad"
+        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
+        print(f"  - 加载VAD模型: {model_name} {cached} (设备: {device})")
+        vad_model = AutoModel(
+            model=model_name,
             device=device,
             disable_update=True,
         )
         
         # SenseVoice 复检模型（配置VAD）
-        print(f"  - 加载复检模型: SenseVoiceSmall (设备: {device})")
+        model_name = "iic/SenseVoiceSmall"
+        cached = "(已缓存)" if check_model_cached(model_name) else "(首次下载)"
+        print(f"  - 加载复检模型: SenseVoiceSmall {cached} (设备: {device})")
         sensevoice_model = AutoModel(
-            model="iic/SenseVoiceSmall",
+            model=model_name,
             vad_model="fsmn-vad",
             vad_kwargs={"max_single_segment_time": 30000},
             device=device,
@@ -165,8 +244,10 @@ def _run_sensevoice(audio_path):
             input=audio_path,
             cache={},
             language="auto",
+            use_itn=True,
             batch_size_s=60,
             merge_vad=True,
+            merge_length_s=15,  # 合并后的音频片段长度
         )
         
         if result and len(result) > 0:
@@ -195,8 +276,10 @@ def _run_sensevoice_array(audio_array, sample_rate):
             input=temp_path,
             cache={},
             language="auto",
+            use_itn=True,
             batch_size_s=60,
             merge_vad=True,
+            merge_length_s=15,  # 合并后的音频片段长度
         )
         
         # 删除临时文件
@@ -294,20 +377,42 @@ def _call_llm_merge(paraformer_text, sensevoice_text):
 # ==================== 实时录音处理类 ====================
 
 class RealtimeASR:
-    """实时语音识别处理器"""
+    """实时语音识别处理器
+    
+    优化特性：
+    - 使用 fsmn-vad 进行实时语音端点检测
+    - 使用实时标点模型进行流式标点恢复
+    - 基于 VAD 结果智能分句，提升识别体验
+    """
     
     def __init__(self, session_id):
         self.session_id = session_id
-        self.audio_buffer = []
         self.sample_rate = 16000
-        self.cache = {}  # 流式识别缓存
-        self.chunk_size = [0, 10, 5]  # [0, 10, 5] 表示600ms实时出字
-        self.chunk_stride = self.chunk_size[1] * 960  # 600ms对应的采样点数
+        
+        # ASR 相关配置
+        self.audio_buffer = []  # ASR 音频缓冲区
+        self.asr_cache = {}  # 流式 ASR 识别缓存
+        self.chunk_size = [0, 10, 5]  # [0, 10, 5] 表示 600ms 实时出字
+        self.asr_chunk_stride = self.chunk_size[1] * 960  # 600ms = 9600 采样点
+        
+        # VAD 相关配置
+        self.vad_buffer = []  # VAD 音频缓冲区
+        self.vad_cache = {}  # VAD 检测缓存
+        self.vad_chunk_size = 200  # VAD 检测粒度 200ms
+        self.vad_chunk_stride = int(self.vad_chunk_size * self.sample_rate / 1000)  # 3200 采样点
+        self.is_speech_active = False  # 当前是否检测到语音
+        self.speech_start_time = 0  # 语音开始时间（毫秒）
+        self.total_audio_ms = 0  # 已处理的音频总时长（毫秒）
+        
+        # 标点相关配置
+        self.punc_cache = {}  # 实时标点缓存
         self.all_text = ""  # 累积所有识别文本（无标点）
         self.text_with_punc = ""  # 已添加标点的文本
         self.pending_text = ""  # 等待标点的文本
-        self.punc_threshold = 30  # 累积到30字符时做标点
-        self.full_audio = []  # 完整录音缓存（用于SenseVoice）
+        self.sentence_buffer = ""  # 当前句子缓冲区（VAD 分句用）
+        
+        # 完整录音缓存（用于 SenseVoice 最终识别）
+        self.full_audio = []
         
     def add_audio(self, audio_data):
         """添加音频数据到缓冲区"""
@@ -322,63 +427,175 @@ class RealtimeASR:
             # 将字节数据转换为 float32 numpy 数组
             audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             self.audio_buffer.extend(audio_np)
-            self.full_audio.extend(audio_np)  # 保存完整音频用于SenseVoice
+            self.vad_buffer.extend(audio_np)
+            self.full_audio.extend(audio_np)  # 保存完整音频用于 SenseVoice
         except Exception as e:
             print(f"❌ 音频数据处理错误: {str(e)}")
+    
+    def _process_vad(self):
+        """处理 VAD 语音端点检测
+        
+        返回值：
+        - None: 没有检测到端点变化
+        - {'type': 'start', 'time': ms}: 检测到语音开始
+        - {'type': 'end', 'time': ms}: 检测到语音结束
+        """
+        if len(self.vad_buffer) < self.vad_chunk_stride:
+            return None
+        
+        try:
+            # 取出 VAD chunk
+            vad_chunk = np.array(self.vad_buffer[:self.vad_chunk_stride], dtype=np.float32)
+            self.vad_buffer = self.vad_buffer[self.vad_chunk_stride:]
+            
+            # VAD 检测
+            is_final = False
+            vad_result = vad_model.generate(
+                input=vad_chunk,
+                cache=self.vad_cache,
+                is_final=is_final,
+                chunk_size=self.vad_chunk_size
+            )
+            
+            self.total_audio_ms += self.vad_chunk_size
+            
+            if vad_result and len(vad_result) > 0:
+                segments = vad_result[0].get("value", [])
+                
+                # 解析 VAD 输出
+                # [[beg, end]]: 完整语音段
+                # [[beg, -1]]: 只检测到起始点
+                # [[-1, end]]: 只检测到结束点
+                # []: 无检测
+                
+                for seg in segments:
+                    if len(seg) >= 2:
+                        beg, end = seg[0], seg[1]
+                        
+                        if beg >= 0 and end == -1:
+                            # 检测到语音开始
+                            if not self.is_speech_active:
+                                self.is_speech_active = True
+                                self.speech_start_time = beg
+                                return {'type': 'start', 'time': beg}
+                        
+                        elif beg == -1 and end >= 0:
+                            # 检测到语音结束
+                            if self.is_speech_active:
+                                self.is_speech_active = False
+                                return {'type': 'end', 'time': end}
+                        
+                        elif beg >= 0 and end >= 0:
+                            # 完整语音段（开始和结束）
+                            return {'type': 'segment', 'start': beg, 'end': end}
+            
+            return None
+            
+        except Exception as e:
+            print(f"⚠️ VAD 检测错误: {str(e)}")
+            return None
+    
+    def _apply_realtime_punc(self, text):
+        """使用实时标点模型添加标点
+        
+        实时标点模型支持流式处理，会根据上下文智能添加标点
+        """
+        if not text or not punc_realtime_model:
+            return text
+        
+        try:
+            punc_result = punc_realtime_model.generate(
+                input=text,
+                cache=self.punc_cache
+            )
+            if punc_result and len(punc_result) > 0:
+                return punc_result[0].get("text", text)
+        except Exception as e:
+            print(f"⚠️ 实时标点恢复失败: {str(e)}")
+        
+        return text
         
     def process_audio(self):
-        """处理缓冲区中的音频（流式）"""
-        # 检查是否有足够的音频数据（600ms）
-        if len(self.audio_buffer) < self.chunk_stride:
+        """处理缓冲区中的音频（流式）
+        
+        优化逻辑：
+        1. 先进行 VAD 检测，获取语音端点信息
+        2. 进行流式 ASR 识别
+        3. 使用实时标点模型添加标点
+        4. 当 VAD 检测到语音结束时，强制输出当前句子
+        """
+        # 先处理 VAD
+        vad_event = self._process_vad()
+        
+        # 检查是否有足够的音频数据进行 ASR（600ms）
+        if len(self.audio_buffer) < self.asr_chunk_stride:
+            # 如果有 VAD 事件但没有足够音频，返回 VAD 状态
+            if vad_event:
+                return {
+                    "text": "",
+                    "punc_text": "",
+                    "full_text": self.text_with_punc + self.pending_text,
+                    "is_final": False,
+                    "vad_event": vad_event
+                }
             return None
         
         try:
             # 取出一个 chunk 的音频
-            speech_chunk = np.array(self.audio_buffer[:self.chunk_stride], dtype=np.float32)
+            speech_chunk = np.array(self.audio_buffer[:self.asr_chunk_stride], dtype=np.float32)
+            self.audio_buffer = self.audio_buffer[self.asr_chunk_stride:]
             
             # 流式 ASR 识别
             asr_result = asr_model.generate(
                 input=speech_chunk,
-                cache=self.cache,
+                cache=self.asr_cache,
                 is_final=False,
                 chunk_size=self.chunk_size,
                 encoder_chunk_look_back=4,
                 decoder_chunk_look_back=1,
             )
             
+            text = ""
+            punc_text = ""
+            
             if asr_result and len(asr_result) > 0:
-                text = asr_result[0]["text"]
+                text = asr_result[0].get("text", "")
                 
-                # 累积原始文本
-                self.all_text += text
-                self.pending_text += text
-                
-                # 移除已处理的音频
-                self.audio_buffer = self.audio_buffer[self.chunk_stride:]
-                
-                # 增量标点恢复（累积到阈值时处理）
-                punc_text = ""
-                if len(self.pending_text) >= self.punc_threshold and punc_model:
-                    try:
-                        punc_result = punc_model.generate(input=self.pending_text)
-                        if punc_result and len(punc_result) > 0:
-                            punc_text = punc_result[0]["text"]
-                            self.text_with_punc += punc_text
-                            self.pending_text = ""
-                    except Exception as e:
-                        print(f"⚠️ 标点恢复失败: {str(e)}")
-                        punc_text = self.pending_text
+                if text:
+                    # 累积原始文本
+                    self.all_text += text
+                    self.pending_text += text
+                    self.sentence_buffer += text
+                    
+                    # 检查是否需要进行标点处理
+                    # 条件：VAD 检测到语音结束，或累积文本超过阈值
+                    should_apply_punc = False
+                    
+                    if vad_event and vad_event.get('type') == 'end':
+                        # VAD 检测到语音结束，强制处理当前句子
+                        should_apply_punc = True
+                    elif len(self.pending_text) >= 20:
+                        # 累积超过 20 字符时处理
+                        should_apply_punc = True
+                    
+                    if should_apply_punc and self.pending_text:
+                        # 使用实时标点模型
+                        punc_text = self._apply_realtime_punc(self.pending_text)
                         self.text_with_punc += punc_text
                         self.pending_text = ""
-                
-                return {
-                    "text": text,
-                    "punc_text": punc_text,
-                    "full_text": self.text_with_punc + self.pending_text,
-                    "is_final": False
-                }
+                        
+                        # 如果是 VAD 结束事件，重置句子缓冲区
+                        if vad_event and vad_event.get('type') == 'end':
+                            self.sentence_buffer = ""
             
-            return None
+            return {
+                "text": text,
+                "punc_text": punc_text,
+                "full_text": self.text_with_punc + self.pending_text,
+                "is_final": False,
+                "vad_event": vad_event,
+                "is_speech_active": self.is_speech_active
+            }
             
         except Exception as e:
             print(f"❌ 流式识别错误: {str(e)}")
@@ -388,26 +605,27 @@ class RealtimeASR:
         """完成识别，生成最终结果"""
         try:
             # 处理最后剩余的音频
-            if len(self.audio_buffer) >= 4800:  # 至少300ms
+            if len(self.audio_buffer) >= 4800:  # 至少 300ms
                 speech_chunk = np.array(self.audio_buffer, dtype=np.float32)
                 asr_result = asr_model.generate(
                     input=speech_chunk,
-                    cache=self.cache,
+                    cache=self.asr_cache,
                     is_final=True,
                     chunk_size=self.chunk_size,
                 )
                 
                 if asr_result and len(asr_result) > 0:
-                    text = asr_result[0]["text"]
-                    self.all_text += text
-                    self.pending_text += text
+                    text = asr_result[0].get("text", "")
+                    if text:
+                        self.all_text += text
+                        self.pending_text += text
             
-            # 对剩余待处理文本进行最终标点恢复
+            # 对剩余待处理文本使用离线标点模型（更准确）
             if self.pending_text and punc_model:
                 try:
                     punc_result = punc_model.generate(input=self.pending_text)
                     if punc_result and len(punc_result) > 0:
-                        self.text_with_punc += punc_result[0]["text"]
+                        self.text_with_punc += punc_result[0].get("text", self.pending_text)
                 except Exception as e:
                     print(f"⚠️ 最终标点恢复失败: {str(e)}")
                     self.text_with_punc += self.pending_text
@@ -417,7 +635,7 @@ class RealtimeASR:
             paraformer_text = self.text_with_punc
             print(f"✅ Paraformer完整文本: {paraformer_text} ({len(paraformer_text)}字)")
             
-            # 使用SenseVoice对完整音频进行识别
+            # 使用 SenseVoice 对完整音频进行识别
             sensevoice_text = ""
             if len(self.full_audio) > 0:
                 print(f"🔁 开始SenseVoice完整识别...")
@@ -428,7 +646,7 @@ class RealtimeASR:
                 except Exception as e:
                     print(f"❌ SenseVoice完整识别失败: {str(e)}")
             
-            # 调用LLM合并纠错（如果两个结果都有内容）
+            # 调用 LLM 合并纠错
             llm_merged_text = ""
             if paraformer_text or sensevoice_text:
                 llm_merged_text = _call_llm_merge(paraformer_text, sensevoice_text)
@@ -492,13 +710,17 @@ def handle_audio_data(data):
         emit('error', {'message': '会话不存在'})
         return
     
-    asr = active_sessions[session_id]
-    asr.add_audio(data)
-    
-    # 处理音频并返回实时结果
-    result = asr.process_audio()
-    if result:
-        emit('transcription', result)
+    try:
+        asr = active_sessions[session_id]
+        asr.add_audio(data)
+        
+        # 处理音频并返回实时结果
+        result = asr.process_audio()
+        if result:
+            emit('transcription', result)
+    except Exception as e:
+        print(f"❌ 音频处理错误 [{session_id}]: {str(e)}")
+        # 不发送错误，避免中断录音流程
 
 
 @socketio.on('stop_recording')
@@ -516,12 +738,27 @@ def handle_stop_recording():
     # 通知前端录音已停止，开始LLM处理
     emit('recording_stopped', {'message': '录音已停止，开始LLM纠错'})
     
-    # 生成最终结果
-    final_result = asr.finalize()
-    emit('final_result', final_result)
-    
-    # 清理会话
-    del active_sessions[session_id]
+    try:
+        # 生成最终结果（可能耗时较长，包含SenseVoice和LLM处理）
+        final_result = asr.finalize()
+        emit('final_result', final_result)
+    except Exception as e:
+        print(f"❌ 最终处理错误 [{session_id}]: {str(e)}")
+        traceback.print_exc()
+        # 返回已有的部分结果
+        emit('final_result', {
+            'paraformer': asr.text_with_punc + asr.pending_text,
+            'sensevoice': '',
+            'llm_merged': '',
+            'paraformer_length': len(asr.text_with_punc + asr.pending_text),
+            'sensevoice_length': 0,
+            'llm_merged_length': 0,
+            'error': str(e)
+        })
+    finally:
+        # 确保清理会话
+        if session_id in active_sessions:
+            del active_sessions[session_id]
 
 
 # ==================== REST API 路由 ====================

@@ -1,5 +1,6 @@
 services:
   asr-api:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile

@@ -1,0 +1,31 @@
+# ASR API 服务器依赖（GPU 版本）
+# 用于 Docker 部署到 NVIDIA GPU 服务器
+#
+# 注意: torch 和 torchaudio 在 Dockerfile 中单独安装
+
+# Web框架
+flask>=2.3.0
+flask-socketio>=5.3.0
+flask-cors>=4.0.0
+python-socketio>=5.9.0
+eventlet>=0.33.0
+
+# FunASR 语音识别
+funasr>=1.0.0
+modelscope>=1.9.0
+
+# 音频处理
+soundfile>=0.12.0
+librosa>=0.10.0
+scipy>=1.10.0
+
+# HTTP请求（LLM调用）
+requests>=2.31.0
+
+# 数据处理
+numpy>=1.24.0,<2.0.0
+
+# FunASR额外依赖（GPU版本）
+onnxruntime-gpu>=1.15.0
+kaldiio>=2.18.0
+typeguard>=2.13.3

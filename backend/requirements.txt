@@ -1,10 +1,12 @@
 # ASR API 服务器依赖
 # 用于 asr_api_server.py
+#
+# 本地开发（macOS/CPU）: pip install -r requirements.txt
+# Docker/GPU 服务器: 使用 requirements-gpu.txt
 
-# 深度学习框架（FunASR依赖）
-# 注意: torch和torchaudio在Dockerfile中单独安装（支持CUDA）
-# torch>=2.0.0
-# torchaudio>=2.0.0
+# 深度学习框架（需单独安装）
+# macOS: pip install torch torchaudio
+# GPU: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
 
 # Web框架
 flask>=2.3.0
@@ -29,6 +31,7 @@ requests>=2.31.0
 numpy>=1.24.0,<2.0.0
 
 # FunASR额外依赖
-onnxruntime-gpu>=1.15.0
+# macOS/CPU 使用 onnxruntime，GPU 服务器使用 onnxruntime-gpu
+onnxruntime>=1.15.0
 kaldiio>=2.18.0
 typeguard>=2.13.3

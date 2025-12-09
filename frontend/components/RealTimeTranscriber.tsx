@@ -88,9 +88,14 @@ const RealTimeTranscriber: React.FC = () => {
     audioChunksRef.current = [];
     
     try {
-      // 1. 连接 Socket.IO
+      // 1. 连接 Socket.IO（配置超时参数以支持长时间录音）
       const socket = io(API_BASE_URL, {
         transports: ['websocket'],
+        // 与后端配置匹配，增加超时时间
+        timeout: 120000,  // 连接超时 120 秒
+        reconnection: true,  // 启用自动重连
+        reconnectionAttempts: 3,  // 最多重连 3 次
+        reconnectionDelay: 1000,  // 重连延迟 1 秒
       });
 
       socketRef.current = socket;
@@ -144,9 +149,29 @@ const RealTimeTranscriber: React.FC = () => {
         socketRef.current = null;
       });
 
-      socket.on('disconnect', () => {
-        console.log('⚠️ 断开连接');
+      socket.on('disconnect', (reason) => {
+        console.log('⚠️ 断开连接，原因:', reason);
         socketRef.current = null;
+        // 如果是服务器主动断开或传输错误，显示提示
+        if (reason === 'transport error' || reason === 'transport close') {
+          setError('连接中断，请检查网络后重试');
+          setIsProcessingLLM(false);
+        }
+      });
+
+      // 重连事件
+      socket.on('reconnect_attempt', (attempt) => {
+        console.log(`🔄 正在尝试重连 (${attempt}/3)...`);
+      });
+
+      socket.on('reconnect', () => {
+        console.log('✅ 重连成功');
+      });
+
+      socket.on('reconnect_failed', () => {
+        console.log('❌ 重连失败');
+        setError('连接断开且重连失败，请刷新页面重试');
+        setIsProcessingLLM(false);
       });
 
       // 2. 获取麦克风
