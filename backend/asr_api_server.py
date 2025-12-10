@@ -37,7 +37,6 @@ socketio = SocketIO(
 
 # 全局模型实例
 asr_model = None
-punc_model = None
 punc_realtime_model = None  # 实时标点模型
 vad_model = None  # VAD语音端点检测模型
 sensevoice_model = None
@@ -76,7 +75,7 @@ def init_models():
     - 如果模型不存在则自动下载到缓存目录
     - Docker运行时通过挂载卷持久化模型，避免重复下载
     """
-    global asr_model, punc_model, punc_realtime_model, vad_model, sensevoice_model, timestamp_model
+    global asr_model, punc_realtime_model, vad_model, sensevoice_model, timestamp_model
     
     if asr_model is None:
         print("🔄 正在加载模型...")
@@ -126,16 +125,6 @@ def init_models():
         cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
         print(f"  - 加载 ASR 模型: {model_name} {cached} (设备: {device})")
         asr_model = AutoModel(
-            model=model_name,
-            device=device,
-            disable_update=True,
-        )
-        
-        # 加载标点恢复模型（离线，用于最终结果）
-        model_name = "ct-punc"
-        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
-        print(f"  - 加载标点模型: {model_name} {cached} (设备: {device})")
-        punc_model = AutoModel(
             model=model_name,
             device=device,
             disable_update=True,
@@ -236,11 +225,11 @@ def _run_paraformer(audio_path):
         if result and len(result) > 0:
             raw_text = result[0].get("text", "")
         
-        # 标点恢复
-        if raw_text and punc_model:
-            punc_result = punc_model.generate(input=raw_text)
+        # 标点恢复（使用实时标点模型）
+        if raw_text and punc_realtime_model:
+            punc_result = punc_realtime_model.generate(input=raw_text, cache={})
             if punc_result and len(punc_result) > 0:
-                return punc_result[0]["text"]
+                return punc_result[0].get("text", raw_text)
         
         return raw_text
         
@@ -446,13 +435,12 @@ def _call_llm_merge(paraformer_text, sensevoice_text):
     # 构建系统提示词
     system_prompt = """你是一个专业的语音识别结果校对助手。你的任务是：
     1. **对比分析**：对比两个语音识别模型的输出结果
-    - Paraformer：实时流式识别结果，速度快但准确度相对较低，可能存在较多错误
-    - SenseVoice：完整音频识别结果，准确度高，质量更可靠
+    - Paraformer：实时流式识别结果
+    - SenseVoice：完整音频识别结果
 
     2. **纠错合并策略**：
-    - 优先采用SenseVoice的结果，它的准确度明显高于Paraformer
-    - 在SenseVoice明显有不合理的情况下，参考Paraformer进行补充
-    - 识别并纠正识别错误（同音字、多字、少字、错别字、标点符号等）
+    - SenseVoice结果的准确度略高于Paraformer
+    - 结合两个模型的结果，识别并纠正识别错误（同音字、多字、少字、错别字、标点符号等）
     - 保持语句通顺、语义连贯
 
     3. **输出要求**：
@@ -462,7 +450,7 @@ def _call_llm_merge(paraformer_text, sensevoice_text):
     # 从全局缓存读取热词并添加到提示词中
     if hotwords_cache and len(hotwords_cache) > 0:
         hotword_list = "、".join(hotwords_cache)
-        system_prompt += f"\n4. **自定义词匹配替换**（优先使用以下自定义词替换识别结果中的可能错误的词）：\n{hotword_list}"
+        system_prompt += f"\n4. **自定义词匹配替换**（优先使用以下自定义词替换识别结果中的多音字和词语）：\n{hotword_list}"
     
     # 构建用户输入
     user_content = f"""请检查、纠错并合并以下两个语音识别结果：
@@ -788,17 +776,10 @@ class RealtimeASR:
                         self.all_text += text
                         self.pending_text += text
             
-            # 对剩余待处理文本使用离线标点模型（更准确）
-            if self.pending_text and punc_model:
-                try:
-                    punc_result = punc_model.generate(input=self.pending_text)
-                    if punc_result and len(punc_result) > 0:
-                        self.text_with_punc += punc_result[0].get("text", self.pending_text)
-                except Exception as e:
-                    print(f"⚠️ 最终标点恢复失败: {str(e)}")
-                    self.text_with_punc += self.pending_text
-            else:
-                self.text_with_punc += self.pending_text
+            # 对剩余待处理文本使用实时标点模型
+            if self.pending_text:
+                punc_text = self._apply_realtime_punc(self.pending_text)
+                self.text_with_punc += punc_text
             
             paraformer_text = self.text_with_punc
             print(f"✅ Paraformer完整文本: {paraformer_text} ({len(paraformer_text)}字)")
