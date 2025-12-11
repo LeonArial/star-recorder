@@ -109,54 +109,61 @@ def init_models():
             device = "cpu"
             print(f"⚠️ 设备检测失败，使用 CPU 模式: {e}")
         
-        # 检查模型是否已缓存
-        def check_model_cached(model_name):
-            """检查模型是否已在缓存中"""
-            # ModelScope模型通常缓存在 hub/模型名 目录下
-            model_path = os.path.join(MODELS_CACHE_DIR, 'hub', model_name.replace('/', '--'))
-            if os.path.exists(model_path):
-                return True
-            # 也检查直接的模型名目录
-            model_path_alt = os.path.join(MODELS_CACHE_DIR, 'hub', model_name)
-            return os.path.exists(model_path_alt)
+        # FunASR 模型名到实际目录名的映射
+        MODEL_DIR_MAP = {
+            "paraformer-zh-streaming": "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+            "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727": "punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727",
+            "fsmn-vad": "speech_fsmn_vad_zh-cn-16k-common-pytorch",
+            "iic/SenseVoiceSmall": "SenseVoiceSmall",
+            "fa-zh": "speech_timestamp_prediction-v1-16k-offline",
+        }
+        
+        def get_model_path(model_name):
+            """获取模型本地路径，如果已缓存则返回本地路径，否则返回模型名（触发下载）"""
+            actual_name = MODEL_DIR_MAP.get(model_name, model_name.split('/')[-1])
+            local_path = os.path.join(MODELS_CACHE_DIR, 'models', 'iic', actual_name)
+            if os.path.exists(local_path):
+                return local_path, True  # 返回本地路径
+            return model_name, False  # 返回模型名触发下载
         
         # 加载中文流式 ASR 模型
         model_name = "paraformer-zh-streaming"
-        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
-        print(f"  - 加载 ASR 模型: {model_name} {cached} (设备: {device})")
+        model_path, is_cached = get_model_path(model_name)
+        print(f"  - 加载 ASR 模型: {model_name} {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
         asr_model = AutoModel(
-            model=model_name,
+            model=model_path,
             device=device,
             disable_update=True,
         )
         
         # 加载实时标点模型（支持流式处理，带缓存）
         model_name = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
-        cached = "(已缓存)" if check_model_cached(model_name) else "(首次下载)"
-        print(f"  - 加载实时标点模型: punc_realtime {cached} (设备: {device})")
+        model_path, is_cached = get_model_path(model_name)
+        print(f"  - 加载实时标点模型: punc_realtime {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
         punc_realtime_model = AutoModel(
-            model=model_name,
+            model=model_path,
             device=device,
             disable_update=True,
         )
         
         # 加载VAD语音端点检测模型（实时）
         model_name = "fsmn-vad"
-        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
-        print(f"  - 加载VAD模型: {model_name} {cached} (设备: {device})")
+        model_path, is_cached = get_model_path(model_name)
+        print(f"  - 加载VAD模型: {model_name} {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
         vad_model = AutoModel(
-            model=model_name,
+            model=model_path,
             device=device,
             disable_update=True,
         )
         
         # SenseVoice 复检模型（配置VAD）
         model_name = "iic/SenseVoiceSmall"
-        cached = "(已缓存)" if check_model_cached(model_name) else "(首次下载)"
-        print(f"  - 加载复检模型: SenseVoiceSmall {cached} (设备: {device})")
+        model_path, is_cached = get_model_path(model_name)
+        vad_path, _ = get_model_path("fsmn-vad")  # VAD 模型路径
+        print(f"  - 加载复检模型: SenseVoiceSmall {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
         sensevoice_model = AutoModel(
-            model=model_name,
-            vad_model="fsmn-vad",
+            model=model_path,
+            vad_model=vad_path,
             vad_kwargs={"max_single_segment_time": 30000},
             device=device,
             disable_update=True,
@@ -165,10 +172,10 @@ def init_models():
         
         # 时间戳预测模型（用于生成字级时间戳）
         model_name = "fa-zh"
-        cached = "(已缓存)" if check_model_cached(f"iic/{model_name}") else "(首次下载)"
-        print(f"  - 加载时间戳模型: {model_name} {cached} (设备: {device})")
+        model_path, is_cached = get_model_path(model_name)
+        print(f"  - 加载时间戳模型: {model_name} {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
         timestamp_model = AutoModel(
-            model=model_name,
+            model=model_path,
             device=device,
             disable_update=True,
         )
