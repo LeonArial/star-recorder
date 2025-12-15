@@ -29,3 +29,4 @@ numpy>=1.24.0,<2.0.0
 onnxruntime-gpu>=1.15.0
 kaldiio>=2.18.0
 typeguard>=2.13.3
+emoji>=2.15.0
