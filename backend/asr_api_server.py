@@ -388,11 +388,10 @@ def _call_llm_merge_with_timestamps(paraformer_text, segments):
  2) 【Paraformer完整文本】（实时流式，作为参考）
  
  你的目标是输出【纠错后的SenseVoice分段结果】，并严格遵守：
- 1. 默认保持【SenseVoice分段结果】不改动。
- 2. 只有当你能通过与【Paraformer完整文本】对照，明确判断 SenseVoice 存在“明显错字/漏字/多字/专有名词错误”（且修改后语义更合理）时，才对对应分段做【最小化】纠错。
- 3. Paraformer 可能包含实时识别错误：不要为了贴合 Paraformer 而改坏 SenseVoice；如果无法确定谁对谁错，保持 SenseVoice 原文。
- 4. 必须保持每个分段的 start_ms/end_ms 不变，分段数量不变；只允许修改 text。
- 5. 输出格式必须是JSON数组，每个元素包含 start_ms、end_ms、text 三个字段。
+ 1. 只有当你能通过与【Paraformer完整文本】对照，明确判断 SenseVoice 存在“明显错字/漏字/多字/专有名词错误”（且修改后语义更合理）时，才对对应分段做【最小化】纠错。
+ 2. SenseVoice 可能包含部分识别错误，可能会出现日文和其他非中文语言，倘若出现这种情况，除了明确的专业名称，以【Paraformer完整文本】中的中文为准，进行修改替换。
+ 3. 必须保持每个分段的 start_ms/end_ms 不变，分段数量不变；只允许修改 text。
+ 4. 输出格式必须是JSON数组，每个元素包含 start_ms、end_ms、text 三个字段。
  
  输出示例：
  [
@@ -748,7 +747,8 @@ def _call_llm_merge(paraformer_text, sensevoice_text):
                     "content": user_content
                 }
             ],
-            "temperature": 0.6
+            "temperature": 0.6,
+            "chat_template_kwargs": {"enable_thinking": False}
         }
         
         print(f"🤖 正在调用LLM合并结果...")
