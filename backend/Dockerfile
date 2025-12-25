@@ -1,4 +1,4 @@
-# 星声记 ASR API 服务器 Docker 镜像
+# 星纪ASR服务端 API 服务器 Docker 镜像
 # 基于CUDA镜像以支持GPU加速
 
 FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04

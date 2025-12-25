@@ -2,7 +2,7 @@
 
 > 目录定位：`/Users/leon/Documents/code/星纪/backend`
 
-该目录包含星声记项目的语音识别（ASR）后端，基于 **Flask + Flask-SocketIO**，整合 **FunASR** 的 Paraformer 流式模型、SenseVoice 复检模型、VAD 端点检测与 LLM 纠错逻辑。服务同时提供 REST API（文件转写）与 WebSocket（实时录音）两种接入方式。
+该目录包含星纪ASR服务端项目的语音识别（ASR）后端，基于 **Flask + Flask-SocketIO**，整合 **FunASR** 的 Paraformer 流式模型、SenseVoice 复检模型、VAD 端点检测与 LLM 纠错逻辑。服务同时提供 REST API（文件转写）与 WebSocket（实时录音）两种接入方式。
 
 ---
 
@@ -81,7 +81,7 @@ pip install -r requirements-gpu.txt
 ## 本地开发
 
 ```bash
-cd /Users/leon/Documents/code/星声记/backend
+cd /Users/leon/Documents/code/星纪ASR服务端/backend
 
 # 1. 安装依赖
 pip install -r requirements.txt
