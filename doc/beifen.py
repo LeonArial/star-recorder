@@ -14,6 +14,8 @@ from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from funasr import AutoModel
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
+from funasr.models.fun_asr_nano.model import FunASRNano
+from funasr.metrics.compute_acc import compute_accuracy
 import soundfile as sf
 import librosa
 import requests
@@ -117,6 +119,7 @@ def init_models():
             "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727": "punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727",
             "fsmn-vad": "speech_fsmn_vad_zh-cn-16k-common-pytorch",
             "iic/SenseVoiceSmall": "SenseVoiceSmall",
+            "FunAudioLLM/Fun-ASR-Nano-2512": "Fun-ASR-Nano-2512",
         }
         
         def get_model_path(model_name):
@@ -157,19 +160,17 @@ def init_models():
             disable_update=True,
         )
         
-        # SenseVoice 复检模型（配置VAD）
-        model_name = "iic/SenseVoiceSmall"
+        # Fun-ASR-Nano-2512 复检模型（配置VAD）
+        model_name = "FunAudioLLM/Fun-ASR-Nano-2512"
         model_path, is_cached = get_model_path(model_name)
         vad_path, _ = get_model_path("fsmn-vad")  # VAD 模型路径
-        print(f"  - 加载复检模型: SenseVoiceSmall {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
+        print(f"  - 加载复检模型: Fun-ASR-Nano-2512 {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
         sensevoice_model = AutoModel(
             model=model_path,
             vad_model=vad_path,
             vad_kwargs={"max_single_segment_time": 30000},
             device=device,
             disable_update=True,
-            use_itn=True,
-            language="zn",
         )
         
         print("✅ 所有模型加载完成！")
@@ -215,17 +216,14 @@ def _clean_sensevoice_text(text):
 
 
 def _run_sensevoice(audio_path):
-    """使用SenseVoice进行完整音频识别（文件路径）"""
+    """使用Fun-ASR-Nano-2512进行完整音频识别（文件路径）"""
     try:
         with sensevoice_model_lock:
             result = sensevoice_model.generate(
-                input=audio_path,
+                input=[audio_path],
                 cache={},
-                language="auto",
-                use_itn=True,
-                batch_size_s=60,
-                merge_vad=True,
-                merge_length_s=15,  # 合并后的音频片段长度
+                itn=True,
+                batch_size=1,
             )
         
         if result and len(result) > 0:
@@ -303,8 +301,10 @@ def _run_sensevoice_with_timestamps(audio_path):
                 # 识别该段
                 with sensevoice_model_lock:
                     result = sensevoice_model.generate(
-                        input=temp_path,
+                        input=[temp_path],
                         cache={},
+                        itn=True,
+                        batch_size=1,
                     )
                 
                 if result and len(result) > 0:
@@ -334,7 +334,7 @@ def _run_sensevoice_with_timestamps(audio_path):
 
 
 def _run_sensevoice_array(audio_array, sample_rate):
-    """使用SenseVoice进行完整音频识别（numpy数组）"""
+    """使用Fun-ASR-Nano-2512进行完整音频识别（numpy数组）"""
     try:
         # 保存为临时文件
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
@@ -345,11 +345,10 @@ def _run_sensevoice_array(audio_array, sample_rate):
         
         with sensevoice_model_lock:
             result = sensevoice_model.generate(
-                input=temp_path,
+                input=[temp_path],
                 cache={},
-                batch_size_s=60,
-                merge_vad=True,
-                merge_length_s=15,  # 合并后的音频片段长度
+                itn=True,
+                batch_size=1,
             )
         
         # 删除临时文件
@@ -961,7 +960,7 @@ def get_models_info():
         "data": {
             "asr_model": "paraformer-zh-streaming",
             "punc_model": "ct-punc",
-            "sensevoice_model": "iic/SenseVoiceSmall",
+            "sensevoice_model": "FunAudioLLM/Fun-ASR-Nano-2512",
             "llm_model": LLM_MODEL,
             "models_loaded": asr_model is not None
         }
