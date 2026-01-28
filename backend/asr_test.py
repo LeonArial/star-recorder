@@ -13,9 +13,8 @@ from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from funasr import AutoModel
-from funasr.utils.postprocess_utils import rich_transcription_postprocess
 from funasr.models.fun_asr_nano.model import FunASRNano
-from funasr.metrics.compute_acc import compute_accuracy
+from funasr.utils.postprocess_utils import rich_transcription_postprocess
 import soundfile as sf
 import librosa
 import requests
@@ -45,17 +44,13 @@ asr_model = None
 punc_realtime_model = None  # 实时标点模型
 vad_model = None  # VAD语音端点检测模型
 sensevoice_model = None
+sensevoice_kwargs = None  # Fun-ASR-Nano 推理参数
 
 # 全局模型推理锁（threading 模式下避免并发推理导致缓存/内部状态竞争）
 asr_model_lock = threading.Lock()
 punc_model_lock = threading.Lock()
 vad_model_lock = threading.Lock()
 sensevoice_model_lock = threading.Lock()
-
-# LLM配置
-LLM_API_URL = "http://10.8.75.207:9997/v1/chat/completions"
-LLM_API_KEY = "sk-dmowsenrtifmlnpmlhaatxgkxnhbmusjfzgnofvlhtblslwa"
-LLM_MODEL = "qwen3:8b"
 
 # 支持的音频格式
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'wma', 'webm'}
@@ -66,6 +61,10 @@ MODELS_CACHE_DIR = os.environ.get('MODELSCOPE_CACHE',
     os.path.join(os.path.dirname(__file__), 'models_cache'))
 HF_CACHE_DIR = os.environ.get('HF_HOME',
     os.path.join(os.path.dirname(__file__), 'hf_cache'))
+
+# 原始输出保存目录
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'output')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 存储实时录音会话
 active_sessions = {}
@@ -79,7 +78,7 @@ def init_models():
     - 如果模型不存在则自动下载到缓存目录
     - Docker运行时通过挂载卷持久化模型，避免重复下载
     """
-    global asr_model, punc_realtime_model, vad_model, sensevoice_model
+    global asr_model, punc_realtime_model, vad_model, sensevoice_model, sensevoice_kwargs
     
     if asr_model is None:
         print("🔄 正在加载模型...")
@@ -160,19 +159,16 @@ def init_models():
             disable_update=True,
         )
         
-        # Fun-ASR-Nano-2512 复检模型（配置VAD）
+        # Fun-ASR-Nano-2512 复检模型（直接推理模式）
         model_name = "FunAudioLLM/Fun-ASR-Nano-2512"
         model_path, is_cached = get_model_path(model_name)
-        vad_path, _ = get_model_path("fsmn-vad")  # VAD 模型路径
         print(f"  - 加载复检模型: Fun-ASR-Nano-2512 {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
-        sensevoice_model = AutoModel(
-            model=model_path,
-            vad_model=vad_path,
-            vad_kwargs={"max_single_segment_time": 30000},
-            device=device,
-            disable_update=True,
-            hotwords=["星纪"]
+        sensevoice_model, sensevoice_kwargs = FunASRNano.from_pretrained(
+            model=model_path if is_cached else model_name,
+            device=device
         )
+        sensevoice_model.eval()
+        print("Fun-ASR-Nano-2512 已切换到推理模式")
         
         print("✅ 所有模型加载完成！")
 
@@ -180,6 +176,73 @@ def init_models():
 def allowed_file(filename):
     """检查文件格式是否支持"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _save_raw_output(result, audio_path, output_type="inference"):
+    """保存 Fun-ASR-Nano-2512 原始输出到 JSON
+    
+    Args:
+        result: 模型原始输出结果
+        audio_path: 音频文件路径
+        output_type: 输出类型标识（inference/segment）
+    """
+    try:
+        from datetime import datetime
+        
+        # 生成输出文件名
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        audio_basename = os.path.basename(audio_path)
+        output_filename = f"nano_{output_type}_{timestamp}_{audio_basename}.json"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
+        
+        # 构建保存数据
+        save_data = {
+            'timestamp': datetime.now().isoformat(),
+            'audio_file': audio_basename,
+            'audio_path': audio_path,
+            'output_type': output_type,
+            'raw_result': _serialize_result(result)
+        }
+        
+        # 保存为 JSON
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+        
+        print(f"    💾 原始输出已保存: {output_filename}")
+        
+    except Exception as e:
+        print(f"    ⚠️ 保存原始输出失败: {str(e)}")
+
+
+def _serialize_result(obj):
+    """序列化模型输出对象，处理 tensor 等特殊类型"""
+    import torch
+    
+    if isinstance(obj, dict):
+        return {k: _serialize_result(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_serialize_result(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return [_serialize_result(item) for item in obj]
+    elif isinstance(obj, torch.Tensor):
+        return {
+            '_type': 'torch.Tensor',
+            'shape': list(obj.shape),
+            'dtype': str(obj.dtype),
+            'device': str(obj.device),
+            'data': obj.cpu().tolist() if obj.numel() < 1000 else f"<tensor of {obj.numel()} elements>"
+        }
+    elif isinstance(obj, np.ndarray):
+        return {
+            '_type': 'numpy.ndarray',
+            'shape': list(obj.shape),
+            'dtype': str(obj.dtype),
+            'data': obj.tolist() if obj.size < 1000 else f"<array of {obj.size} elements>"
+        }
+    elif isinstance(obj, (int, float, str, bool, type(None))):
+        return obj
+    else:
+        return str(obj)
 
 
 def _clean_sensevoice_text(text):
@@ -220,157 +283,144 @@ def _run_sensevoice(audio_path):
     """使用Fun-ASR-Nano-2512进行完整音频识别（文件路径）"""
     try:
         with sensevoice_model_lock:
-            result = sensevoice_model.generate(
-                input=[audio_path],
-                cache={},
-                itn=True,
-                batch_size=1,
+            result = sensevoice_model.inference(
+                data_in=[audio_path],
+                **sensevoice_kwargs
             )
         
-        if result and len(result) > 0:
-            raw_text = result[0].get("text", "")
-            # 使用官方的富文本后处理函数清理特殊标记
-            clean_text = rich_transcription_postprocess(raw_text)
-            # 去除emoji
-            clean_text = emoji.replace_emoji(clean_text, replace='')
-            # 去除虚假填充词
-            clean_text = _clean_sensevoice_text(clean_text)
-            return clean_text
+        # 保存原始输出
+        _save_raw_output(result, audio_path, "full_audio")
+        
+        if result and len(result) > 0 and len(result[0]) > 0:
+            raw_text = result[0][0].get("text", "")
+            return raw_text
         
         return ""
         
     except Exception as e:
-        raise Exception(f"SenseVoice识别失败: {str(e)}")
+        raise Exception(f"Fun-ASR-Nano识别失败: {str(e)}")
 
 
 def _run_sensevoice_with_timestamps(audio_path):
-    """使用独立VAD模型获取语音段时间戳，再用SenseVoice识别每段（优化版）
+    """使用 Fun-ASR-Nano-2512 直接识别完整音频并提取时间戳
     
     优化要点：
-    1. 一次性加载音频，避免重复 I/O
-    2. 预先提取所有音频段到内存
-    3. 直接传递 numpy 数组给模型，避免临时文件创建/删除
+    1. 直接对完整音频进行推理，使用模型自带的 timestamps（包含标点符号）
+    2. 从字符级时间戳合并为句子级时间戳
+    3. 无需 VAD 分段，大幅提升识别速度
     
     Returns:
         tuple: (full_text, segments)
-            - full_text: 完整文本
+            - full_text: 完整文本（带标点）
             - segments: 句级时间戳列表 [{'text': '句子', 'start_ms': 0, 'end_ms': 1000}, ...]
     """
     try:
-        # 先使用独立VAD模型检测语音段
-        print("🔍 VAD检测语音段...")
-        with vad_model_lock:
-            vad_result = vad_model.generate(
-                input=audio_path,
-                cache={},
+        print("🎯 直接识别完整音频（使用 timestamps）...")
+        
+        # 直接对完整音频进行推理
+        with sensevoice_model_lock:
+            result = sensevoice_model.inference(
+                data_in=[audio_path],
+                **sensevoice_kwargs
             )
         
-        # 解析VAD结果，格式为 [[start1, end1], [start2, end2], ...]
-        vad_segments = []
-        if vad_result and len(vad_result) > 0:
-            vad_data = vad_result[0].get("value", [])
-            if vad_data:
-                vad_segments = vad_data
+        # 保存原始输出
+        _save_raw_output(result, audio_path, "full_with_timestamps")
         
-        print(f"  📊 VAD检测到 {len(vad_segments)} 个语音段")
+        if not result or len(result) == 0 or len(result[0]) == 0:
+            print("  ⚠️ 识别结果为空")
+            return "", []
         
-        # 如果VAD没有检测到分段，使用SenseVoice整体识别
-        if not vad_segments:
-            print("  ⚠️ VAD未检测到分段，使用整体识别")
-            text = _run_sensevoice(audio_path)
-            return text, [{'text': text, 'start_ms': 0, 'end_ms': 0}] if text else (text, [])
+        # 提取识别结果（使用带标点的 text 和 timestamps）
+        output = result[0][0]
+        raw_text = output.get("text", "")  # 带标点符号的完整文本
+        timestamps = output.get("timestamps", [])  # 包含标点符号的字符级时间戳
         
-        # 一次性读取完整音频（避免重复I/O）
-        audio_data, sr = librosa.load(audio_path, sr=16000, mono=True)
+        # 文本后处理
+        clean_text = raw_text
         
-        # 预先提取所有有效音频段到内存
-        audio_segments = []
-        for start_ms, end_ms in vad_segments:
-            start_sample = int(start_ms * sr / 1000)
-            end_sample = int(end_ms * sr / 1000)
-            segment_audio = audio_data[start_sample:end_sample]
-            
-            if len(segment_audio) >= sr * 0.1:  # 至少 0.1 秒
-                audio_segments.append({
-                    'audio': segment_audio,
-                    'start_ms': int(start_ms),
-                    'end_ms': int(end_ms)
-                })
+        print(f"  📝 识别文本: {len(clean_text)}字")
+        print(f"  ⏱️ 时间戳数量: {len(timestamps)}")
         
-        print(f"  📦 预处理完成，共 {len(audio_segments)} 个有效音频段")
+        # 如果没有时间戳，返回整段文本
+        if not timestamps:
+            print("  ⚠️ 无时间戳信息，返回整段文本")
+            return clean_text, [{'text': clean_text, 'start_ms': 0, 'end_ms': 0}]
         
-        segments = []
+        # 从字符级时间戳合并为句子级时间戳
+        segments = _merge_char_timestamps_to_sentences(clean_text, timestamps)
         
-        # 批量处理音频段（减少模型调用开销）
-        with sensevoice_model_lock:
-            for i, seg_info in enumerate(audio_segments):
-                # 直接使用 numpy 数组而非临时文件
-                result = sensevoice_model.generate(
-                    input=seg_info['audio'],
-                    cache={},
-                    itn=True,
-                    batch_size=1,
-                )
-                
-                if result and len(result) > 0:
-                    raw_text = result[0].get("text", "")
-                    clean_text = rich_transcription_postprocess(raw_text)
-                    clean_text = emoji.replace_emoji(clean_text, replace='')
-                    clean_text = _clean_sensevoice_text(clean_text)
-                    
-                    if clean_text.strip():
-                        segments.append({
-                            'text': clean_text,
-                            'start_ms': seg_info['start_ms'],
-                            'end_ms': seg_info['end_ms']
-                        })
-                        print(f"  ✅ 段{i+1}/{len(audio_segments)}: {seg_info['start_ms']/1000:.1f}s-{seg_info['end_ms']/1000:.1f}s: {clean_text[:30]}...")
-        
-        full_text = ''.join([seg['text'] for seg in segments])
-        print(f"✅ 识别完成: {len(full_text)}字, {len(segments)}段")
-        return full_text, segments
+        print(f"✅ 识别完成: {len(clean_text)}字, {len(segments)}个句子")
+        return clean_text, segments
         
     except Exception as e:
-        print(f"⚠️ SenseVoice时间戳识别失败: {str(e)}")
+        print(f"⚠️ Fun-ASR-Nano时间戳识别失败: {str(e)}")
         traceback.print_exc()
         return "", []
 
 
-def _run_sensevoice_array(audio_array, sample_rate):
-    """使用Fun-ASR-Nano-2512进行完整音频识别（numpy数组）"""
-    try:
-        # 保存为临时文件
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-        temp_path = temp_file.name
-        temp_file.close()
+def _merge_char_timestamps_to_sentences(text, timestamps):
+    """将字符级时间戳合并为句子级时间戳
+    
+    Args:
+        text: 完整识别文本（带标点符号）
+        timestamps: 字符级时间戳列表（包含标点符号）[{'token': '云', 'start_time': 0.24, 'end_time': 0.3}, ...]
+    
+    Returns:
+        句子级时间戳列表 [{'text': '句子', 'start_ms': 0, 'end_ms': 1000}, ...]
+    """
+    if not timestamps:
+        return [{'text': text, 'start_ms': 0, 'end_ms': 0}]
+    
+    # 句子分隔符（根据标点符号分句）
+    sentence_delimiters = {'。', '！', '？', '；', '.', '!', '?', ';'}
+    
+    segments = []
+    current_sentence = ""
+    sentence_start_time = None
+    sentence_end_time = None
+    
+    for i, ts_info in enumerate(timestamps):
+        token = ts_info.get('token', '')
+        start_time = ts_info.get('start_time', 0)
+        end_time = ts_info.get('end_time', 0)
         
-        sf.write(temp_path, audio_array, sample_rate)
+        # 跳过空token
+        if not token:
+            continue
         
-        with sensevoice_model_lock:
-            result = sensevoice_model.generate(
-                input=[temp_path],
-                cache={},
-                itn=True,
-                batch_size=1,
-            )
+        # 记录句子起始时间
+        if sentence_start_time is None:
+            sentence_start_time = start_time
         
-        # 删除临时文件
-        os.remove(temp_path)
+        current_sentence += token
+        sentence_end_time = end_time
         
-        if result and len(result) > 0:
-            raw_text = result[0].get("text", "")
-            clean_text = rich_transcription_postprocess(raw_text)
-            # 去除emoji
-            clean_text = emoji.replace_emoji(clean_text, replace='')
-            # 去除虚假填充词
-            clean_text = _clean_sensevoice_text(clean_text)
-            return clean_text
-        
-        return ""
-        
-    except Exception as e:
-        raise Exception(f"SenseVoice识别失败: {str(e)}")
-
+        # 遇到句子分隔符或到达最后一个字符
+        if token in sentence_delimiters or i == len(timestamps) - 1:
+            if current_sentence.strip():
+                segments.append({
+                    'text': current_sentence.strip(),
+                    'start_ms': int(sentence_start_time * 1000),
+                    'end_ms': int(sentence_end_time * 1000)
+                })
+                print(f"  ✅ 句子 {len(segments)}: {sentence_start_time:.1f}s-{sentence_end_time:.1f}s: {current_sentence.strip()[:30]}...")
+            
+            # 重置
+            current_sentence = ""
+            sentence_start_time = None
+            sentence_end_time = None
+    
+    # 如果还有剩余文本（没有结束标点）
+    if current_sentence.strip():
+        segments.append({
+            'text': current_sentence.strip(),
+            'start_ms': int(sentence_start_time * 1000) if sentence_start_time else 0,
+            'end_ms': int(sentence_end_time * 1000) if sentence_end_time else 0
+        })
+        print(f"  ✅ 句子 {len(segments)}: {sentence_start_time:.1f}s-{sentence_end_time:.1f}s: {current_sentence.strip()[:30]}...")
+    
+    return segments
 
 # ==================== 实时录音处理类 ====================
 
@@ -714,11 +764,6 @@ class RealtimeASR:
                     print(f"✅ 完成: SenseVoice文本 {len(sensevoice_text)}字, {len(timestamps)} 个句子")
                 except Exception as e:
                     print(f"❌ VAD+SenseVoice识别失败: {str(e)}")
-                    # 降级：使用普通识别
-                    try:
-                        sensevoice_text = _run_sensevoice_array(audio_array, self.sample_rate)
-                    except:
-                        pass
             
             return {
                 'paraformer': paraformer_text,
@@ -964,7 +1009,6 @@ def get_models_info():
             "asr_model": "paraformer-zh-streaming",
             "punc_model": "ct-punc",
             "sensevoice_model": "FunAudioLLM/Fun-ASR-Nano-2512",
-            "llm_model": LLM_MODEL,
             "models_loaded": asr_model is not None
         }
     }), 200
