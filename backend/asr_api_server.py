@@ -10,26 +10,6 @@ import sys
 os.environ['TQDM_DISABLE'] = '1'
 os.environ['TQDM_MININTERVAL'] = '99999'
 
-# 强制禁用 tqdm（monkey patch）
-class DummyTqdm:
-    def __init__(self, *args, **kwargs):
-        pass
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        pass
-    def update(self, *args, **kwargs):
-        pass
-    def set_description(self, *args, **kwargs):
-        pass
-    def close(self):
-        pass
-
-sys.modules['tqdm'] = type(sys)('tqdm')
-sys.modules['tqdm'].tqdm = DummyTqdm
-sys.modules['tqdm.auto'] = type(sys)('tqdm.auto')
-sys.modules['tqdm.auto'].tqdm = DummyTqdm
-
 import tempfile
 import wave
 import json
@@ -196,7 +176,7 @@ def init_models():
         sensevoice_model = AutoModel(
             model=model_path,
             vad_model=vad_path,
-            vad_kwargs={"max_single_segment_time": 30000},
+            vad_kwargs={"max_single_segment_time": 120000},
             device=device,
             disable_update=True,
             use_itn=True,
@@ -273,13 +253,17 @@ def _run_sensevoice(audio_path):
         raise Exception(f"SenseVoice识别失败: {str(e)}")
 
 
-def _run_sensevoice_with_timestamps(audio_path):
+def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
     """使用独立VAD模型获取语音段时间戳，再用SenseVoice识别每段（优化版）
     
     优化要点：
     1. 一次性加载音频，避免重复 I/O
     2. 预先提取所有音频段到内存
     3. 直接传递 numpy 数组给模型，避免临时文件创建/删除
+    
+    Args:
+        audio_path: 音频文件路径
+        progress_callback: 进度回调函数，接收 (current, total)
     
     Returns:
         tuple: (full_text, segments)
@@ -289,13 +273,19 @@ def _run_sensevoice_with_timestamps(audio_path):
     try:
         # 先使用独立VAD模型检测语音段
         print("🔍 VAD检测语音段...")
+        if progress_callback:
+            progress_callback(5, 100)  # VAD 开始占 5%
+        
         with vad_model_lock:
             vad_result = vad_model.generate(
                 input=audio_path,
                 cache={},
             )
         
-        # 解析VAD结果，格式为 [[start1, end1], [start2, end2], ...]
+        if progress_callback:
+            progress_callback(15, 100) # VAD 完成占 15%
+        
+        # 解析VAD结果
         vad_segments = []
         if vad_result and len(vad_result) > 0:
             vad_data = vad_result[0].get("value", [])
@@ -304,23 +294,50 @@ def _run_sensevoice_with_timestamps(audio_path):
         
         print(f"📊 VAD检测到 {len(vad_segments)} 个语音段")
         
-        # 如果VAD没有检测到分段，使用SenseVoice整体识别
+        # 合并短段
+        MIN_SEGMENT_DURATION_MS = 60000
+        if vad_segments:
+            merged_segments = []
+            current_segment = None
+            
+            for start_ms, end_ms in vad_segments:
+                if current_segment is None:
+                    current_segment = [start_ms, end_ms]
+                else:
+                    current_duration = current_segment[1] - current_segment[0]
+                    if current_duration < MIN_SEGMENT_DURATION_MS:
+                        current_segment[1] = end_ms
+                    else:
+                        merged_segments.append(current_segment)
+                        current_segment = [start_ms, end_ms]
+            
+            if current_segment is not None:
+                merged_segments.append(current_segment)
+            
+            vad_segments = merged_segments
+            print(f"✂️ 合并后剩余 {len(vad_segments)} 个语音段（每段 ≥60秒）")
+        
+        if progress_callback:
+            progress_callback(20, 100) # 预处理完成占 20%
+        
+        # 如果VAD没有检测到分段
         if not vad_segments:
             print("  ⚠️ VAD未检测到分段，使用整体识别")
             text = _run_sensevoice(audio_path)
+            if progress_callback:
+                progress_callback(100, 100)
             return text, [{'text': text, 'start_ms': 0, 'end_ms': 0}] if text else (text, [])
         
-        # 一次性读取完整音频（避免重复I/O）
+        # 读取音频
         audio_data, sr = librosa.load(audio_path, sr=16000, mono=True)
         
-        # 预先提取所有有效音频段到内存
         audio_segments = []
         for start_ms, end_ms in vad_segments:
             start_sample = int(start_ms * sr / 1000)
             end_sample = int(end_ms * sr / 1000)
             segment_audio = audio_data[start_sample:end_sample]
             
-            if len(segment_audio) >= sr * 1:  # 至少 1 秒
+            if len(segment_audio) >= sr * 1:
                 audio_segments.append({
                     'audio': segment_audio,
                     'start_ms': int(start_ms),
@@ -330,11 +347,11 @@ def _run_sensevoice_with_timestamps(audio_path):
         print(f"📦 预处理完成，共 {len(audio_segments)} 个有效音频段")
         
         segments = []
+        total_segs = len(audio_segments)
         
-        # 批量处理音频段（减少模型调用开销）
+        # 批量处理
         with sensevoice_model_lock:
             for i, seg_info in enumerate(audio_segments):
-                # 直接使用 numpy 数组而非临时文件
                 result = sensevoice_model.generate(
                     input=seg_info['audio'],
                     cache={},
@@ -352,11 +369,19 @@ def _run_sensevoice_with_timestamps(audio_path):
                             'start_ms': seg_info['start_ms'],
                             'end_ms': seg_info['end_ms']
                         })
-                        print(f"➡️ 段{i+1}/{len(audio_segments)}: {seg_info['start_ms']/1000:.1f}s-{seg_info['end_ms']/1000:.1f}s: {clean_text[:30]}...")
+                        print(f"➡️ 段{i+1}/{total_segs}: {seg_info['start_ms']/1000:.1f}s-{seg_info['end_ms']/1000:.1f}s: {clean_text[:30]}...")
+                
+                # 更新进度：从 20% 到 95%
+                if progress_callback:
+                    current_progress = 20 + int((i + 1) / total_segs * 75)
+                    progress_callback(current_progress, 100)
         
         full_text = ''.join([seg['text'] for seg in segments])
-        return full_text, segments
         
+        if progress_callback:
+            progress_callback(100, 100)
+            
+        return full_text, segments
     except Exception as e:
         print(f"⚠️ SenseVoice时间戳识别失败: {str(e)}")
         traceback.print_exc()
@@ -657,7 +682,7 @@ class RealtimeASR:
             print(f"❌ 流式识别错误 [{self.session_id}]: {str(e)}")
             return None
     
-    def finalize(self):
+    def finalize(self, progress_callback=None):
         """完成识别，生成最终结果"""
         try:
             finalize_start = time.time()
@@ -665,6 +690,9 @@ class RealtimeASR:
             audio_size_mb = len(self.full_audio) * 4 / 1024 / 1024  # float32 = 4 bytes
             
             print(f"\n📊 录音统计: 时长 {recording_duration:.1f}s, 音频数据 {audio_size_mb:.2f}MB")
+            
+            if progress_callback:
+                progress_callback(2, 100) # 开始处理
             
             # 处理最后剩余的音频
             if len(self.audio_buffer) >= 4800:  # 至少 300ms
@@ -692,6 +720,9 @@ class RealtimeASR:
             paraformer_time = time.time() - finalize_start
             print(f"✅ Paraformer: {len(paraformer_text)}字 (耗时 {paraformer_time:.2f}s)")
             
+            if progress_callback:
+                progress_callback(5, 100) # Paraformer 处理完成
+            
             # 使用 VAD分段 + SenseVoice识别
             sensevoice_text = ""
             timestamps = []
@@ -707,7 +738,7 @@ class RealtimeASR:
                     sf.write(temp_path, audio_array, self.sample_rate)
                     
                     # 调用SenseVoice识别
-                    sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path)
+                    sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path, progress_callback=progress_callback)
                     os.remove(temp_path)
                     
                     sensevoice_time = time.time() - sensevoice_start
@@ -717,6 +748,9 @@ class RealtimeASR:
             
             total_time = time.time() - finalize_start
             print(f"\n⏱️  总处理耗时: {total_time:.2f}s\n")
+            
+            if progress_callback:
+                progress_callback(100, 100)
             
             return {
                 'paraformer': paraformer_text,
@@ -817,10 +851,17 @@ def handle_stop_recording():
     except:
         pass  # 客户端可能已断开，忽略错误
      
+    def progress_callback(current, total):
+        try:
+            progress = int(current / total * 100)
+            socketio.emit('processing_progress', {'progress': progress}, room=session_id)
+        except:
+            pass
+
     try:
         # 生成最终结果
         with asr.lock:
-            final_result = asr.finalize()
+            final_result = asr.finalize(progress_callback=progress_callback)
         try:
             emit('final_result', final_result)
         except:
@@ -878,6 +919,7 @@ def transcribe_audio():
         
         file = request.files['file']
         generate_ts = request.form.get('generate_timestamps', 'true').lower() == 'true'
+        session_id = request.form.get('session_id')
         
         # 检查文件名
         if file.filename == '':
@@ -919,13 +961,27 @@ def transcribe_audio():
             # 删除上传的临时文件
             os.remove(temp_upload_path)
             
+            # 定义进度回调
+            def progress_callback(current, total):
+                if session_id:
+                    try:
+                        progress = int(current / total * 100)
+                        socketio.emit('processing_progress', {'progress': progress}, room=session_id)
+                    except:
+                        pass
+
             # 使用SenseVoice识别（带VAD句级时间戳）
             print("✨ SenseVoice识别中...")
             if generate_ts:
-                sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path)
+                sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path, progress_callback=progress_callback)
                 print(f"✅ SenseVoice完成: {len(sensevoice_text)}字, {len(timestamps)} 个句子")
             else:
+                # 即使不生成时间戳，也可以提供基本的进度反馈（0/100）
+                if progress_callback:
+                    progress_callback(10, 100)
                 sensevoice_text = _run_sensevoice(temp_path)
+                if progress_callback:
+                    progress_callback(100, 100)
                 timestamps = []
                 print(f"✅ SenseVoice完成: {len(sensevoice_text)}字")
             
