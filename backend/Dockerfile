@@ -55,8 +55,6 @@ RUN pip3 install --no-cache-dir -r requirements-gpu.txt
 
 # 复制应用代码
 COPY asr_api_server.py /app/
-COPY hotwords.json /app/
-
 # 创建模型缓存目录
 RUN mkdir -p /root/.cache/modelscope /root/.cache/huggingface
 
