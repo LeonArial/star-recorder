@@ -17,7 +17,7 @@ import threading
 import numpy as np
 import logging
 import time
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from funasr import AutoModel
@@ -80,6 +80,46 @@ HF_CACHE_DIR = os.environ.get('HF_HOME',
 active_sessions = {}
 active_sessions_lock = threading.Lock()
 
+# ==================== 日志工具 ====================
+
+def _short_sid(session_id: str) -> str:
+    """取 session_id 后6位作为短标识"""
+    return session_id[-6:] if session_id and len(session_id) > 6 else (session_id or '------')
+
+def _log(msg: str, sid: str = None, level: str = 'INFO'):
+    """统一日志输出，带可选的会话 ID 前缀
+    
+    level: INFO / WARN / ERROR / 留空
+    """
+    prefix = f'[{_short_sid(sid)}]' if sid else '[SYSTEM]'
+    tag = {'INFO': ' ', 'WARN': '!', 'ERROR': 'X'}.get(level, ' ')
+    print(f'{tag} {prefix} {msg}')
+
+# 音频备份目录（用于录音防丢失）
+AUDIO_BACKUP_DIR = os.path.join(os.path.dirname(__file__), 'audio_backups')
+os.makedirs(AUDIO_BACKUP_DIR, exist_ok=True)
+
+# 备份文件自动清理（保留7天）
+BACKUP_EXPIRE_SECONDS = 7 * 24 * 60 * 60
+
+def _cleanup_old_backups():
+    """定期清理过期的音频备份文件"""
+    while True:
+        try:
+            now = time.time()
+            if os.path.exists(AUDIO_BACKUP_DIR):
+                for fname in os.listdir(AUDIO_BACKUP_DIR):
+                    fpath = os.path.join(AUDIO_BACKUP_DIR, fname)
+                    if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > BACKUP_EXPIRE_SECONDS:
+                        os.remove(fpath)
+        except Exception as e:
+            _log(f'清理备份文件失败: {e}', level='WARN')
+        time.sleep(600)  # 每10分钟检查一次
+
+# 启动备份清理守护线程
+_cleanup_thread = threading.Thread(target=_cleanup_old_backups, daemon=True)
+_cleanup_thread.start()
+
 def init_models():
     """初始化 ASR、标点、VAD与复检模型
     
@@ -91,7 +131,9 @@ def init_models():
     global asr_model, punc_realtime_model, vad_model, sensevoice_model
     
     if asr_model is None:
-        print("🔄 正在加载模型...")
+        print("\n" + "=" * 50)
+        print(" 模型加载")
+        print("=" * 50)
         
         # 设置模型缓存环境变量（确保FunASR使用正确的缓存路径）
         os.environ['MODELSCOPE_CACHE'] = MODELS_CACHE_DIR
@@ -101,8 +143,7 @@ def init_models():
         os.makedirs(MODELS_CACHE_DIR, exist_ok=True)
         os.makedirs(HF_CACHE_DIR, exist_ok=True)
         
-        print(f"📁 模型缓存目录: {MODELS_CACHE_DIR}")
-        print(f"📁 HuggingFace缓存目录: {HF_CACHE_DIR}")
+        print(f"  缓存目录: {MODELS_CACHE_DIR}")
         
         # 检测设备（CUDA GPU > Apple MPS > CPU）
         try:
@@ -110,17 +151,17 @@ def init_models():
             if torch.cuda.is_available():
                 # NVIDIA GPU（Linux/Windows 服务器）
                 device = "cuda:0"
-                print(f"✅ 检测到 CUDA GPU: {torch.cuda.get_device_name(0)}")
+                print(f"  设备: CUDA GPU ({torch.cuda.get_device_name(0)})")
             elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
                 # Apple Silicon MPS（M1/M2/M3/M4 Mac）
                 device = "mps"
-                print("✅ 检测到 Apple Silicon，使用 MPS 加速")
+                print("  设备: Apple MPS")
             else:
                 device = "cpu"
-                print("⚠️ 未检测到 GPU，使用 CPU 模式（性能较低）")
+                print("  设备: CPU（无GPU，性能较低）")
         except Exception as e:
             device = "cpu"
-            print(f"⚠️ 设备检测失败，使用 CPU 模式: {e}")
+            print(f"  设备: CPU（检测失败: {e}）")
         
         # FunASR 模型名到实际目录名的映射
         MODEL_DIR_MAP = {
@@ -141,7 +182,7 @@ def init_models():
         # 加载中文流式 ASR 模型
         model_name = "paraformer-zh-streaming"
         model_path, is_cached = get_model_path(model_name)
-        print(f"  - 加载 ASR 模型: {model_name} {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
+        print(f"  加载 ASR 模型: {model_name} {'[缓存]' if is_cached else '[下载]'}")
         asr_model = AutoModel(
             model=model_path,
             device=device,
@@ -151,7 +192,7 @@ def init_models():
         # 加载实时标点模型（支持流式处理，带缓存）
         model_name = "iic/punc_ct-transformer_zh-cn-common-vad_realtime-vocab272727"
         model_path, is_cached = get_model_path(model_name)
-        print(f"  - 加载实时标点模型: punc_realtime {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
+        print(f"  加载标点模型: punc_realtime {'[缓存]' if is_cached else '[下载]'}")
         punc_realtime_model = AutoModel(
             model=model_path,
             device=device,
@@ -161,7 +202,7 @@ def init_models():
         # 加载VAD语音端点检测模型（实时）
         model_name = "fsmn-vad"
         model_path, is_cached = get_model_path(model_name)
-        print(f"  - 加载VAD模型: {model_name} {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
+        print(f"  加载 VAD 模型: {model_name} {'[缓存]' if is_cached else '[下载]'}")
         vad_model = AutoModel(
             model=model_path,
             device=device,
@@ -172,7 +213,7 @@ def init_models():
         model_name = "iic/SenseVoiceSmall"
         model_path, is_cached = get_model_path(model_name)
         vad_path, _ = get_model_path("fsmn-vad")  # VAD 模型路径
-        print(f"  - 加载复检模型: SenseVoiceSmall {'(已缓存)' if is_cached else '(首次下载)'} (设备: {device})")
+        print(f"  加载复检模型: SenseVoiceSmall {'[缓存]' if is_cached else '[下载]'}")
         sensevoice_model = AutoModel(
             model=model_path,
             vad_model=vad_path,
@@ -186,7 +227,8 @@ def init_models():
             merge_length_s=15,  # 合并后的音频片段长度
         )
         
-        print("✅ 所有模型加载完成！")
+        print("  所有模型加载完成")
+        print("=" * 50 + "\n")
 
 
 def allowed_file(filename):
@@ -253,28 +295,22 @@ def _run_sensevoice(audio_path):
         raise Exception(f"SenseVoice识别失败: {str(e)}")
 
 
-def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
+def _run_sensevoice_with_timestamps(audio_path, progress_callback=None, sid=None):
     """使用独立VAD模型获取语音段时间戳，再用SenseVoice识别每段（优化版）
-    
-    优化要点：
-    1. 一次性加载音频，避免重复 I/O
-    2. 预先提取所有音频段到内存
-    3. 直接传递 numpy 数组给模型，避免临时文件创建/删除
     
     Args:
         audio_path: 音频文件路径
         progress_callback: 进度回调函数，接收 (current, total)
+        sid: 会话 ID（用于日志前缀）
     
     Returns:
         tuple: (full_text, segments)
-            - full_text: 完整文本
-            - segments: 句级时间戳列表 [{'text': '句子', 'start_ms': 0, 'end_ms': 1000}, ...]
     """
     try:
         # 先使用独立VAD模型检测语音段
-        print("🔍 VAD检测语音段...")
+        _log('SenseVoice: VAD 分段中...', sid)
         if progress_callback:
-            progress_callback(5, 100)  # VAD 开始占 5%
+            progress_callback(5, 100)
         
         with vad_model_lock:
             vad_result = vad_model.generate(
@@ -283,7 +319,7 @@ def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
             )
         
         if progress_callback:
-            progress_callback(15, 100) # VAD 完成占 15%
+            progress_callback(15, 100)
         
         # 解析VAD结果
         vad_segments = []
@@ -291,8 +327,6 @@ def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
             vad_data = vad_result[0].get("value", [])
             if vad_data:
                 vad_segments = vad_data
-        
-        print(f"📊 VAD检测到 {len(vad_segments)} 个语音段")
         
         # 合并短段
         MIN_SEGMENT_DURATION_MS = 60000
@@ -314,15 +348,17 @@ def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
             if current_segment is not None:
                 merged_segments.append(current_segment)
             
+            _log(f'SenseVoice: VAD {len(vad_segments)}段 -> 合并为 {len(merged_segments)}段', sid)
             vad_segments = merged_segments
-            print(f"✂️ 合并后剩余 {len(vad_segments)} 个语音段（每段 ≥60秒）")
+        else:
+            _log(f'SenseVoice: VAD {len(vad_segments)}段', sid)
         
         if progress_callback:
-            progress_callback(20, 100) # 预处理完成占 20%
+            progress_callback(20, 100)
         
         # 如果VAD没有检测到分段
         if not vad_segments:
-            print("  ⚠️ VAD未检测到分段，使用整体识别")
+            _log('SenseVoice: VAD 无分段，使用整体识别', sid, level='WARN')
             text = _run_sensevoice(audio_path)
             if progress_callback:
                 progress_callback(100, 100)
@@ -344,10 +380,9 @@ def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
                     'end_ms': int(end_ms)
                 })
         
-        print(f"📦 预处理完成，共 {len(audio_segments)} 个有效音频段")
-        
         segments = []
         total_segs = len(audio_segments)
+        _log(f'SenseVoice: 识别 {total_segs} 段...', sid)
         
         # 批量处理
         with sensevoice_model_lock:
@@ -369,7 +404,6 @@ def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
                             'start_ms': seg_info['start_ms'],
                             'end_ms': seg_info['end_ms']
                         })
-                        print(f"➡️ 段{i+1}/{total_segs}: {seg_info['start_ms']/1000:.1f}s-{seg_info['end_ms']/1000:.1f}s: {clean_text[:30]}...")
                 
                 # 更新进度：从 20% 到 95%
                 if progress_callback:
@@ -383,7 +417,7 @@ def _run_sensevoice_with_timestamps(audio_path, progress_callback=None):
             
         return full_text, segments
     except Exception as e:
-        print(f"⚠️ SenseVoice时间戳识别失败: {str(e)}")
+        _log(f'SenseVoice 识别失败: {str(e)}', sid, level='ERROR')
         traceback.print_exc()
         return "", []
 
@@ -451,7 +485,7 @@ class RealtimeASR:
             self.vad_buffer.extend(audio_np)
             self.full_audio.extend(audio_np)  # 保存完整音频用于 SenseVoice
         except Exception as e:
-            print(f"❌ 音频数据处理错误: {str(e)}")
+            _log(f'音频数据处理错误: {str(e)}', self.session_id, level='ERROR')
     
     def _process_vad(self):
         """处理 VAD 语音端点检测
@@ -479,7 +513,7 @@ class RealtimeASR:
                         chunk_size=self.vad_chunk_size
                     )
             except Exception as e:
-                print(f"⚠️ VAD 检测错误 [{self.session_id}]: {str(e)}")
+                _log(f'VAD 检测错误: {str(e)}', self.session_id, level='WARN')
                 self.vad_cache = {}
                 try:
                     with vad_model_lock:
@@ -490,7 +524,7 @@ class RealtimeASR:
                             chunk_size=self.vad_chunk_size
                         )
                 except Exception as e2:
-                    print(f"⚠️ VAD 重试失败 [{self.session_id}]: {str(e2)}")
+                    _log(f'VAD 重试失败: {str(e2)}', self.session_id, level='WARN')
                     self.vad_buffer = self.vad_buffer[self.vad_chunk_stride:]
                     self.total_audio_ms += self.vad_chunk_size
                     return None
@@ -532,7 +566,7 @@ class RealtimeASR:
             return None
             
         except Exception as e:
-            print(f"⚠️ VAD 检测错误 [{self.session_id}]: {str(e)}")
+            _log(f'VAD 检测异常: {str(e)}', self.session_id, level='WARN')
             return None
     
     def _apply_realtime_punc(self, text):
@@ -552,7 +586,7 @@ class RealtimeASR:
             if punc_result and len(punc_result) > 0:
                 return punc_result[0].get("text", text)
         except Exception as e:
-            print(f"⚠️ 实时标点恢复失败: {str(e)}")
+            _log(f'实时标点恢复失败: {str(e)}', self.session_id)
         
         return text
         
@@ -597,7 +631,7 @@ class RealtimeASR:
                         decoder_chunk_look_back=1,
                     )
             except Exception as e:
-                print(f"❌ 流式识别错误 [{self.session_id}]: {str(e)}")
+                _log(f'流式识别错误: {str(e)}', self.session_id, level='ERROR')
                 self.asr_cache = {}
                 try:
                     with asr_model_lock:
@@ -610,7 +644,7 @@ class RealtimeASR:
                             decoder_chunk_look_back=1,
                         )
                 except Exception as e2:
-                    print(f"❌ 流式识别重试失败 [{self.session_id}]: {str(e2)}")
+                    _log(f'流式识别重试失败: {str(e2)}', self.session_id, level='ERROR')
                     self.audio_buffer = self.audio_buffer[self.asr_chunk_stride:]
                     self.asr_processed_ms += 600
                     return None
@@ -679,7 +713,7 @@ class RealtimeASR:
             }
             
         except Exception as e:
-            print(f"❌ 流式识别错误 [{self.session_id}]: {str(e)}")
+            _log(f'流式识别异常: {str(e)}', self.session_id, level='ERROR')
             return None
     
     def finalize(self, progress_callback=None):
@@ -689,7 +723,7 @@ class RealtimeASR:
             recording_duration = finalize_start - self.start_time
             audio_size_mb = len(self.full_audio) * 4 / 1024 / 1024  # float32 = 4 bytes
             
-            print(f"\n📊 录音统计: 时长 {recording_duration:.1f}s, 音频数据 {audio_size_mb:.2f}MB")
+            _log(f'录音统计: 时长 {recording_duration:.1f}s, 音频 {audio_size_mb:.1f}MB', self.session_id)
             
             if progress_callback:
                 progress_callback(2, 100) # 开始处理
@@ -718,7 +752,7 @@ class RealtimeASR:
             
             paraformer_text = self.text_with_punc
             paraformer_time = time.time() - finalize_start
-            print(f"✅ Paraformer: {len(paraformer_text)}字 (耗时 {paraformer_time:.2f}s)")
+            _log(f'Paraformer: {len(paraformer_text)}字 ({paraformer_time:.1f}s)', self.session_id)
             
             if progress_callback:
                 progress_callback(5, 100) # Paraformer 处理完成
@@ -726,33 +760,38 @@ class RealtimeASR:
             # 使用 VAD分段 + SenseVoice识别
             sensevoice_text = ""
             timestamps = []
+            backup_audio_id = None
+            
             if len(self.full_audio) > 0:
                 sensevoice_start = time.time()
-                print(f"\n🔁 VAD分段+SenseVoice识别...")
+                _log('SenseVoice 复检开始...', self.session_id)
                 try:
-                    # 保存临时音频文件
+                    # 保存音频文件（同时用于 SenseVoice 识别和备份）
                     audio_array = np.array(self.full_audio, dtype=np.float32)
-                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-                    temp_path = temp_file.name
-                    temp_file.close()
-                    sf.write(temp_path, audio_array, self.sample_rate)
                     
-                    # 调用SenseVoice识别
-                    sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path, progress_callback=progress_callback)
-                    os.remove(temp_path)
+                    # 生成备份文件名
+                    backup_audio_id = f"{self.session_id}_{int(time.time())}"
+                    backup_path = os.path.join(AUDIO_BACKUP_DIR, f"{backup_audio_id}.wav")
+                    sf.write(backup_path, audio_array, self.sample_rate)
+                    
+                    audio_duration_s = len(audio_array) / self.sample_rate
+                    _log(f'音频备份: {_short_sid(backup_audio_id)}.wav ({audio_duration_s:.1f}s)', self.session_id)
+                    
+                    # 调用SenseVoice识别（使用备份文件）
+                    sensevoice_text, timestamps = _run_sensevoice_with_timestamps(backup_path, progress_callback=progress_callback, sid=self.session_id)
                     
                     sensevoice_time = time.time() - sensevoice_start
-                    print(f"✅ SenseVoice: {len(sensevoice_text)}字, {len(timestamps)}段 (耗时 {sensevoice_time:.2f}s)")
+                    _log(f'SenseVoice: {len(sensevoice_text)}字, {len(timestamps)}段 ({sensevoice_time:.1f}s)', self.session_id)
                 except Exception as e:
-                    print(f"❌ VAD+SenseVoice识别失败: {str(e)}")
+                    _log(f'SenseVoice 复检失败: {str(e)}', self.session_id, level='ERROR')
             
             total_time = time.time() - finalize_start
-            print(f"\n⏱️  总处理耗时: {total_time:.2f}s\n")
+            _log(f'总处理耗时: {total_time:.1f}s', self.session_id)
             
             if progress_callback:
                 progress_callback(100, 100)
             
-            return {
+            result = {
                 'paraformer': paraformer_text,
                 'sensevoice': sensevoice_text,
                 'paraformer_length': len(paraformer_text),
@@ -761,8 +800,14 @@ class RealtimeASR:
                 'realtime_segments': self.segments,  # 实时粗略时间戳（备用）
             }
             
+            # 返回备份音频 ID，前端可用于下载服务端完整音频
+            if backup_audio_id:
+                result['backup_audio_id'] = backup_audio_id
+            
+            return result
+            
         except Exception as e:
-            print(f"❌ 最终识别错误: {str(e)}")
+            _log(f'最终识别错误: {str(e)}', self.session_id, level='ERROR')
             return {
                 'paraformer': self.text_with_punc + self.pending_text,
                 'sensevoice': '',
@@ -777,7 +822,8 @@ class RealtimeASR:
 def handle_connect():
     """客户端连接"""
     session_id = request.sid
-    print(f"✅ 客户端连接: {session_id}")
+    now = time.strftime('%m-%d %H:%M:%S')
+    print(f'\n─── [{_short_sid(session_id)}] 连接 {now} ' + '─' * 9)
     emit('connected', {'session_id': session_id})
 
 
@@ -787,7 +833,8 @@ def handle_disconnect():
     session_id = request.sid
     with active_sessions_lock:
         active_sessions.pop(session_id, None)
-    print(f"❌ 客户端断开: {session_id}")
+    now = time.strftime('%m-%d %H:%M:%S')
+    print(f'─── [{_short_sid(session_id)}] 断开 {now} ' + '─' * 9)
 
 
 @socketio.on('start_recording')
@@ -796,7 +843,7 @@ def handle_start_recording():
     session_id = request.sid
     with active_sessions_lock:
         active_sessions[session_id] = RealtimeASR(session_id)
-    print(f"\n🎙️  开始录音: {session_id}")
+    _log('录音开始', session_id)
     emit('recording_started', {'status': 'ok'})
 
 
@@ -826,7 +873,7 @@ def handle_audio_data(data):
             if result:
                 emit('transcription', result)
     except Exception as e:
-        print(f"❌ 音频处理错误 [{session_id}]: {str(e)}")
+        _log(f'音频处理错误: {str(e)}', session_id, level='ERROR')
         # 不发送错误，避免中断录音流程
 
 
@@ -843,7 +890,7 @@ def handle_stop_recording():
         return
  
     asr.is_finalizing = True
-    print(f"🛑 停止录音: {session_id}")
+    _log('录音停止，开始处理...', session_id)
      
     # 通知前端录音已停止
     try:
@@ -865,9 +912,9 @@ def handle_stop_recording():
         try:
             emit('final_result', final_result)
         except:
-            print(f"⚠️  无法发送最终结果（客户端已断开）")
+            _log('无法发送结果（客户端已断开）', session_id, level='WARN')
     except Exception as e:
-        print(f"❌ 最终处理错误 [{session_id}]: {str(e)}")
+        _log(f'最终处理错误: {str(e)}', session_id, level='ERROR')
         traceback.print_exc()
         # 尝试返回已有的部分结果
         try:
@@ -884,9 +931,45 @@ def handle_stop_recording():
         # 确保清理会话
         with active_sessions_lock:
             active_sessions.pop(session_id, None)
+        _log('会话结束', session_id)
 
 
 # ==================== REST API 路由 ====================
+
+@app.route('/api/asr/backup-audio/<backup_id>', methods=['GET'])
+def download_backup_audio(backup_id):
+    """下载服务端备份的完整录音音频
+    
+    当前端 MediaRecorder 因浏览器节流等原因丢失数据时，
+    前端可通过此接口获取 ASR 服务端保存的完整音频（WAV 格式）。
+    备份文件保留 2 小时后自动清理。
+    """
+    # 安全检查：防止路径遍历
+    safe_id = os.path.basename(backup_id)
+    backup_path = os.path.join(AUDIO_BACKUP_DIR, f"{safe_id}.wav")
+    
+    if not os.path.exists(backup_path):
+        return jsonify({"success": False, "error": "备份音频不存在或已过期"}), 404
+    
+    return send_file(
+        backup_path,
+        mimetype='audio/wav',
+        as_attachment=True,
+        download_name=f"{safe_id}.wav"
+    )
+
+
+@app.route('/api/asr/backup-audio/<backup_id>', methods=['DELETE'])
+def delete_backup_audio(backup_id):
+    """前端成功保存录音后，主动删除备份文件释放空间"""
+    safe_id = os.path.basename(backup_id)
+    backup_path = os.path.join(AUDIO_BACKUP_DIR, f"{safe_id}.wav")
+    
+    if os.path.exists(backup_path):
+        os.remove(backup_path)
+    
+    return jsonify({"success": True})
+
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -947,13 +1030,11 @@ def transcribe_audio():
         temp_wav.close()
         
         try:
-            print(f"📁 开始处理文件: {file.filename}")
+            _log(f'文件转录: {file.filename}', session_id)
             
             # 使用librosa读取并转换为WAV格式
-            print("🔄 转换音频格式...")
             audio_data, sr = librosa.load(temp_upload_path, sr=16000, mono=True)
             sf.write(temp_path, audio_data, sr)
-            print(f"✅ 格式转换完成: 16kHz, 单声道")
             
             # 计算音频时长（毫秒）
             audio_duration_ms = int(len(audio_data) / sr * 1000)
@@ -971,19 +1052,17 @@ def transcribe_audio():
                         pass
 
             # 使用SenseVoice识别（带VAD句级时间戳）
-            print("✨ SenseVoice识别中...")
             if generate_ts:
-                sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path, progress_callback=progress_callback)
-                print(f"✅ SenseVoice完成: {len(sensevoice_text)}字, {len(timestamps)} 个句子")
+                sensevoice_text, timestamps = _run_sensevoice_with_timestamps(temp_path, progress_callback=progress_callback, sid=session_id)
+                _log(f'文件转录完成: {len(sensevoice_text)}字, {len(timestamps)}段', session_id)
             else:
-                # 即使不生成时间戳，也可以提供基本的进度反馈（0/100）
                 if progress_callback:
                     progress_callback(10, 100)
                 sensevoice_text = _run_sensevoice(temp_path)
                 if progress_callback:
                     progress_callback(100, 100)
                 timestamps = []
-                print(f"✅ SenseVoice完成: {len(sensevoice_text)}字")
+                _log(f'文件转录完成: {len(sensevoice_text)}字', session_id)
             
             # 返回完整结果
             return jsonify({
@@ -1005,7 +1084,7 @@ def transcribe_audio():
                 os.remove(temp_path)
         
     except Exception as e:
-        print(f"❌ 处理错误: {str(e)}")
+        _log(f'文件转录错误: {str(e)}', session_id, level='ERROR')
         traceback.print_exc()
         return jsonify({
             "success": False,
@@ -1044,33 +1123,18 @@ def get_supported_formats():
 
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("📣 语音识别API服务器")
-    print("=" * 60)
-    print("📝 支持模式:")
-    print("  1. 实时录音模式（WebSocket）:")
-    print("     - Paraformer 实时流式识别")
-    print("     - SenseVoice 完整音频识别（带VAD时间戳）")
-    print("  2. 文件上传模式（REST API）:")
-    print("     - SenseVoice 识别（带VAD时间戳）")
-    print("=" * 60)
-    print("🔧 REST API接口:")
-    print("  - GET  /api/health              健康检查")
-    print("  - POST /api/asr/transcribe      文件转录（SenseVoice+VAD时间戳）")
-    print("  - GET  /api/asr/models          模型信息")
-    print("  - GET  /api/asr/formats         支持格式")
+    print("\n" + "=" * 50)
+    print(" 语音识别 API 服务器")
+    print("=" * 50)
+    print(" REST   POST /api/asr/transcribe  文件转录")
+    print("        GET  /api/health          健康检查")
+    print(" WS     start_recording -> audio_data -> stop_recording")
+    print(" 地址   http://localhost:5006")
+    print("=" * 50)
     print("")
-    print("🔌 WebSocket接口:")
-    print("  - connect                    建立连接")
-    print("  - start_recording            开始录音")
-    print("  - audio_data                 发送音频数据")
-    print("  - stop_recording             停止录音")
-    print("  - transcription              接收实时识别")
-    print("  - recording_stopped          录音已停止")
-    print("  - final_result               接收最终结果")
-    print("=" * 60)
-    print("🌐 访问地址: http://localhost:5006")
-    print("=" * 60)
+    print(" 日志格式: [级别] [会话ID后6位] 消息")
+    print("   ' '=INFO  '!'=WARN  'X'=ERROR")
+    print("=" * 50)
     
     # 初始化模型
     init_models()

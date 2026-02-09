@@ -40,3 +40,4 @@ backend/models_cache/
 backend/hf_cache/
 
 show
+.kiro

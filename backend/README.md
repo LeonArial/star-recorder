@@ -2,7 +2,7 @@
 
 > 目录定位：`/Users/leon/Documents/code/星纪/backend`
 
-该目录包含星纪ASR服务端项目的语音识别（ASR）后端，基于 **Flask + Flask-SocketIO**，整合 **FunASR** 的 Paraformer 流式模型、SenseVoice 复检模型、VAD 端点检测与 LLM 纠错逻辑。服务同时提供 REST API（文件转写）与 WebSocket（实时录音）两种接入方式。
+该目录包含星纪ASR服务端项目的语音识别（ASR）后端，基于 **Flask + Flask-SocketIO**，整合 **FunASR** 的 Paraformer 流式模型、SenseVoice 复检模型、VAD 端点检测。服务同时提供 REST API（文件转写）与 WebSocket（实时录音）两种接入方式。
 
 ---
 
@@ -12,15 +12,10 @@
 
   - 使用 Paraformer + 实时标点模型即时出字。
   - 自动 VAD 分段，SenseVoice 全量复检。
-  - 调用 LLM（Qwen3）进行结果纠错与合并。
 - **离线文件转写（REST API）**：
 
   - 支持 `wav/mp3/ogg/flac/m4a/aac/wma/webm` 等格式。
   - 默认返回 SenseVoice 结果与句级时间戳。
-- **热词系统**：
-
-  - `hotwords.json` 可配置专有名词。
-  - 通过 API 热更新，无需重启服务。
 - **模型缓存**：
 
   - `MODELSCOPE_CACHE`、`HF_HOME` 环境变量可自定义缓存目录，减少重复下载。
@@ -41,7 +36,6 @@ backend/
 ├── docker-compose.yml       # 容器编排示例
 ├── Dockerfile               # 服务镜像构建配置
 ├── download_models.py       # 预下载 FunASR 模型脚本
-├── hotwords.json            # 热词配置
 ├── openapi.(yaml|json)      # REST API 规格
 ├── WebSocket接口文档.md     # WebSocket 事件与示例
 └── logs/、models_cache/     # 运行期日志与模型缓存（可挂载）
@@ -170,18 +164,6 @@ curl -X POST http://localhost:5006/api/asr/transcribe \
 - `timestamps`：经过 LLM 纠错的句级时间戳
 - `realtime_segments`：流式粗时间戳（备用）
 
-
-## 测试脚本
-
-- `test_asr_api.py`：简单的 API 调用示例（上传音频并打印结果）。
-- `test.mp3`：示例音频，可用于快速验证。
-
-运行示例：
-
-```bash
-python test_asr_api.py --file test.mp3 --url http://localhost:5006
-```
-
 ---
 
 ## 常见问题
@@ -193,11 +175,7 @@ python test_asr_api.py --file test.mp3 --url http://localhost:5006
 2. **Mac M 系列性能**
 
    - FunASR 会优先尝试 MPS，若不稳定可手动设置 `USE_MPS=0`。
-3. **LLM 调用失败**
-
-   - 检查 `LLM_API_URL`、`LLM_API_KEY`
-   - 失败时后备策略：直接返回 SenseVoice 结果。
-4. **WebSocket 断线**
+3. **WebSocket 断线**
 
    - SocketIO 已调高 `ping_timeout`、`ping_interval`，若仍断线可检查反向代理超时配置。
 
@@ -205,7 +183,7 @@ python test_asr_api.py --file test.mp3 --url http://localhost:5006
 
 ## 部署建议
 
-- 建议使用 Nginx / Traefik 等反向代理，并放行 `/socket.io/` 长连接。
+- 建议使用 Nginx 反向代理，并放行 `/socket.io/` 长连接。
 - 使用 Docker 时，将 `models_cache`、`hf_cache` 目录挂载到宿主机，避免每次重建镜像重新下载模型。
 - 可通过 `gunicorn + eventlet` 运行，但当前脚本直接使用 `socketio.run`，部署时可结合 `supervisor`、`systemd` 管理进程。
 
