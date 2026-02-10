@@ -95,6 +95,34 @@ def _log(msg: str, sid: str = None, level: str = 'INFO'):
     tag = {'INFO': ' ', 'WARN': '!', 'ERROR': 'X'}.get(level, ' ')
     print(f'{tag} {prefix} {msg}')
 
+# 断连会话保留（宽限期内可恢复）
+# 格式: {original_sid: {'asr': RealtimeASR, 'disconnected_at': float}}
+disconnected_sessions = {}
+disconnected_sessions_lock = threading.Lock()
+SESSION_GRACE_PERIOD = 60  # 断连后保留会话的秒数
+
+def _cleanup_expired_sessions():
+    """定期清理超过宽限期的断连会话"""
+    while True:
+        try:
+            now = time.time()
+            expired = []
+            with disconnected_sessions_lock:
+                for sid, info in disconnected_sessions.items():
+                    if now - info['disconnected_at'] > SESSION_GRACE_PERIOD:
+                        expired.append(sid)
+                for sid in expired:
+                    del disconnected_sessions[sid]
+            if expired:
+                _log(f'清理过期断连会话: {len(expired)}个')
+        except Exception as e:
+            _log(f'清理断连会话失败: {e}', level='WARN')
+        time.sleep(10)
+
+# 启动断连会话清理守护线程
+_session_cleanup_thread = threading.Thread(target=_cleanup_expired_sessions, daemon=True)
+_session_cleanup_thread.start()
+
 # 音频备份目录（用于录音防丢失）
 AUDIO_BACKUP_DIR = os.path.join(os.path.dirname(__file__), 'audio_backups')
 os.makedirs(AUDIO_BACKUP_DIR, exist_ok=True)
@@ -829,12 +857,72 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    """客户端断开"""
+    """客户端断开
+    
+    如果断开时会话正在录音中（未 finalizing），则将会话移入 disconnected_sessions
+    保留宽限期（60s），等待客户端重连恢复。超时后自动清理。
+    """
     session_id = request.sid
+    asr = None
     with active_sessions_lock:
-        active_sessions.pop(session_id, None)
-    now = time.strftime('%m-%d %H:%M:%S')
-    print(f'─── [{_short_sid(session_id)}] 断开 {now} ' + '─' * 9)
+        asr = active_sessions.pop(session_id, None)
+    
+    # 如果会话正在录音且未进入 finalize，保留到宽限区
+    if asr and not asr.is_finalizing:
+        with disconnected_sessions_lock:
+            disconnected_sessions[session_id] = {
+                'asr': asr,
+                'disconnected_at': time.time(),
+            }
+        now = time.strftime('%m-%d %H:%M:%S')
+        print(f'─── [{_short_sid(session_id)}] 断开(保留{SESSION_GRACE_PERIOD}s) {now} ' + '─' * 2)
+    else:
+        now = time.strftime('%m-%d %H:%M:%S')
+        print(f'─── [{_short_sid(session_id)}] 断开 {now} ' + '─' * 9)
+
+
+@socketio.on('resume_recording')
+def handle_resume_recording(data):
+    """恢复断连的录音会话
+    
+    客户端重连后发送此事件，携带原始 session_id。
+    从 disconnected_sessions 中恢复 RealtimeASR 实例，绑定到新 socket。
+    """
+    new_sid = request.sid
+    original_sid = data.get('original_session_id') if isinstance(data, dict) else None
+    
+    if not original_sid:
+        emit('resume_result', {'success': False, 'reason': '缺少 original_session_id'})
+        return
+    
+    # 从宽限区查找会话
+    asr = None
+    with disconnected_sessions_lock:
+        info = disconnected_sessions.pop(original_sid, None)
+        if info:
+            asr = info['asr']
+    
+    if not asr:
+        _log(f'恢复失败: 原会话 {_short_sid(original_sid)} 不存在或已过期', new_sid, level='WARN')
+        emit('resume_result', {'success': False, 'reason': '会话已过期'})
+        return
+    
+    # 更新会话的 session_id 为新 socket ID
+    old_short = _short_sid(original_sid)
+    asr.session_id = new_sid
+    
+    # 绑定到新 socket
+    with active_sessions_lock:
+        active_sessions[new_sid] = asr
+    
+    gap_seconds = time.time() - asr.start_time
+    _log(f'会话恢复成功 (原 {old_short}, 已录 {gap_seconds:.0f}s)', new_sid)
+    
+    emit('resume_result', {
+        'success': True,
+        'current_text': asr.text_with_punc + asr.pending_text,
+        'duration_s': gap_seconds,
+    })
 
 
 @socketio.on('start_recording')

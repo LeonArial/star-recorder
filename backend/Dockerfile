@@ -62,7 +62,7 @@ RUN mkdir -p /root/.cache/modelscope /root/.cache/huggingface
 EXPOSE 5006
 
 # 健康检查（每天一次）
-HEALTHCHECK --interval=24h --timeout=10s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:5006/api/health || exit 1
 
 # 启动命令
